@@ -25,7 +25,9 @@
 - 外部链接、`target="_blank"` 一律交给默认浏览器，不会顶掉 App 内页面。
 - 菜单栏提供：关于 / 退出、编辑（撤销/剪贴板）、重新加载 (⌘R)、在浏览器中打开 (⇧⌘O)、窗口。
 - 标题栏为双色自绘条带：左侧取页面侧栏色、右侧取内容底色、中间画页面同款 1px 分界线，
-  宽度实时跟随侧栏（折叠/拖拽），颜色与深浅主题随页面自动跟随；无标题栏分割线，保留标题文字与红绿灯。
+  宽度实时跟随侧栏（折叠/拖拽），颜色与深浅主题随页面自动跟随；无标题栏分割线，
+  隐藏标题文字（页面自带品牌，避免重复），保留红绿灯。
+- 图标为白底黑鲸鱼 DeepSeek logo（路径取自 dsh web 的 favicon）。
 
 日志：`~/Library/Logs/DeepSeekHarness/deepseek-harness.log`。
 
@@ -93,6 +95,6 @@ Sources/DSHMac/
   WebViewController.swift         WKWebView + 加载状态层
   AppDelegate.swift               窗口、菜单、单实例、安装流程
 Info.plist
-scripts/make-icon.swift           图标生成（SF Symbol + 渐变）
+scripts/make-icon.swift           图标生成（白底黑鲸鱼 DeepSeek logo）
 build.sh                          构建并组装 .app（ad-hoc 签名）
 ```

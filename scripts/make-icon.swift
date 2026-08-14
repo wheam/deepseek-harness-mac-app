@@ -2,46 +2,106 @@ import AppKit
 import Foundation
 
 // Renders the app icon into an iconset directory (PNGs at every required
-// size). Usage: `swift scripts/make-icon.swift <iconset-dir>`
+// size): a white rounded square with the DeepSeek whale logo in black.
+// The whale path is the single SVG path from the dsh web favicon (M/C/Z
+// commands only), embedded verbatim so this repo stays self-contained.
+// Usage: `swift scripts/make-icon.swift <iconset-dir>`
 // The build script then runs `iconutil -c icns` over the result.
 
 let outDir = CommandLine.arguments.count > 1 ? CommandLine.arguments[1] : "/tmp/DSHAppIcon.iconset"
 try? FileManager.default.createDirectory(atPath: outDir, withIntermediateDirectories: true)
 
+let whalePathData = "M48.8354 10.0479C48.3232 9.79199 48.1025 10.2798 47.8032 10.5278C47.7007 10.6079 47.6143 10.7119 47.5273 10.8076C46.7793 11.624 45.9048 12.1597 44.7622 12.0957C43.0923 12 41.666 12.5356 40.4058 13.8398C40.1377 12.2319 39.2476 11.272 37.8926 10.6558C37.1836 10.3359 36.4668 10.0156 35.9702 9.31982C35.6235 8.82373 35.5293 8.27197 35.356 7.72754C35.2456 7.3999 35.1353 7.06396 34.7651 7.00781C34.3633 6.94385 34.2056 7.2876 34.0479 7.57568C33.418 8.75195 33.1733 10.0479 33.1973 11.3599C33.2524 14.312 34.4736 16.6641 36.8999 18.3359C37.1758 18.5278 37.2466 18.7197 37.1597 19C36.9946 19.5757 36.7974 20.1357 36.624 20.7119C36.5137 21.0801 36.3486 21.1597 35.9624 21C34.6309 20.4321 33.481 19.5918 32.4644 18.5757C30.7393 16.8721 29.1792 14.9917 27.2334 13.52C26.7764 13.1758 26.3193 12.856 25.8467 12.5518C23.8618 10.584 26.1069 8.96777 26.627 8.77588C27.1704 8.57568 26.8159 7.8877 25.0591 7.896C23.3022 7.90381 21.6953 8.50391 19.647 9.30371C19.3477 9.42383 19.0322 9.51172 18.7095 9.58398C16.8501 9.22363 14.9199 9.14355 12.9033 9.37598C9.10596 9.80762 6.07275 11.6396 3.84326 14.7681C1.16455 18.5278 0.53418 22.7998 1.30664 27.2559C2.11768 31.9521 4.46582 35.8398 8.07373 38.8799C11.8159 42.0322 16.1255 43.5762 21.041 43.2803C24.0269 43.104 27.3516 42.6963 31.1016 39.4561C32.0469 39.936 33.0396 40.1279 34.686 40.272C35.9546 40.3921 37.1758 40.208 38.1211 40.0078C39.6021 39.688 39.4995 38.2881 38.9639 38.0322C34.623 35.9678 35.5762 36.8081 34.71 36.1279C36.9155 33.4639 40.2402 30.6958 41.54 21.728C41.6426 21.0161 41.5557 20.5679 41.54 19.9917C41.5322 19.6396 41.6108 19.5039 42.0049 19.4639C43.0923 19.3359 44.1479 19.0317 45.1167 18.4878C47.9292 16.9199 49.064 14.3438 49.3315 11.2559C49.3711 10.7837 49.3237 10.2959 48.8354 10.0479ZM24.3262 37.8398C20.1196 34.4639 18.0791 33.3521 17.2358 33.3999C16.4482 33.4482 16.5898 34.3682 16.7632 34.9678C16.9443 35.5601 17.1812 35.9683 17.5117 36.4878C17.7402 36.832 17.8979 37.3442 17.2832 37.728C15.9282 38.584 13.5728 37.4399 13.4624 37.3838C10.7207 35.7358 8.42822 33.5601 6.81348 30.584C5.25342 27.7197 4.34766 24.6479 4.19775 21.3677C4.1582 20.5757 4.38672 20.2959 5.15869 20.1519C6.17529 19.96 7.22314 19.9199 8.23926 20.0718C12.5327 20.7119 16.1885 22.6719 19.2529 25.7759C21.002 27.5439 22.3252 29.6558 23.6885 31.7202C25.1377 33.9121 26.6978 36 28.6831 37.7119C29.3843 38.312 29.9434 38.7681 30.479 39.104C28.8643 39.2881 26.1699 39.3281 24.3262 37.8398ZM26.3433 24.6001C26.3433 24.248 26.6191 23.9678 26.9658 23.9678C27.0444 23.9678 27.1152 23.9839 27.1782 24.0078C27.2651 24.04 27.3438 24.0879 27.4067 24.1602C27.5171 24.272 27.5801 24.4321 27.5801 24.6001C27.5801 24.9521 27.3042 25.2319 26.9575 25.2319C26.6108 25.2319 26.3433 24.9521 26.3433 24.6001ZM32.6064 27.8799C32.2046 28.0479 31.8027 28.1919 31.4165 28.208C30.8179 28.2397 30.1641 27.9922 29.8096 27.688C29.2583 27.2158 28.8643 26.9521 28.6987 26.1279C28.6279 25.7759 28.6675 25.2319 28.7305 24.9199C28.8721 24.248 28.7144 23.8159 28.2495 23.4238C27.8716 23.104 27.3911 23.0161 26.8633 23.0161C26.666 23.0161 26.4849 22.9277 26.3511 22.856C26.1304 22.7441 25.9492 22.4639 26.1226 22.1201C26.1777 22.0078 26.4458 21.7358 26.5088 21.688C27.2256 21.272 28.0527 21.4077 28.8169 21.7197C29.5259 22.0161 30.0615 22.5601 30.834 23.3281C31.6216 24.2559 31.7632 24.5117 32.2124 25.208C32.5669 25.752 32.8901 26.312 33.1104 26.9521C33.2446 27.3521 33.0713 27.6802 32.6064 27.8799Z"
+
+/// Parse the whale path data (`M`/`C`/`Z` absolute commands) into a bezier
+/// path and map the SVG's 50×50 viewBox into the given content rect,
+/// flipping the Y axis (SVG origin is top-left, AppKit's is bottom-left).
+func whaleBezier(data: String, contentRect: NSRect) -> NSBezierPath {
+  let chars = Array(data)
+  let s = contentRect.width / 50
+  let ox = contentRect.minX
+  let oyTop = contentRect.maxY
+
+  func transform(_ point: NSPoint) -> NSPoint {
+    NSPoint(x: ox + point.x * s, y: oyTop - point.y * s)
+  }
+
+  var index = 0
+  var command: Character?
+  func nextNumber() -> CGFloat? {
+    while index < chars.count, chars[index] == " " || chars[index] == "," { index += 1 }
+    let startIndex = index
+    while index < chars.count,
+      chars[index].isNumber || chars[index] == "." || chars[index] == "-" || chars[index] == "+" {
+      index += 1
+    }
+    guard index > startIndex else { return nil }
+    return CGFloat(Double(String(chars[startIndex..<index])) ?? 0)
+  }
+  func nextPoint() -> NSPoint? {
+    guard let x = nextNumber(), let y = nextNumber() else { return nil }
+    return transform(NSPoint(x: x, y: y))
+  }
+
+  let path = NSBezierPath()
+  path.windingRule = .nonZero
+  var current = NSPoint.zero
+  var subpathStart = NSPoint.zero
+  while index < chars.count {
+    let char = chars[index]
+    if char.isLetter {
+      command = char
+      index += 1
+      continue
+    }
+    switch command {
+    case "M":
+      if let point = nextPoint() {
+        path.move(to: point)
+        current = point
+        subpathStart = point
+      } else {
+        index += 1 // malformed data: skip one char instead of looping
+      }
+    case "C":
+      if let control1 = nextPoint(), let control2 = nextPoint(), let point = nextPoint() {
+        path.curve(to: point, controlPoint1: control1, controlPoint2: control2)
+        current = point
+      } else {
+        index += 1
+      }
+    case "Z":
+      path.close()
+      current = subpathStart
+    default:
+      index += 1 // stray character: skip it
+    }
+  }
+  return path
+}
+
 let canvas: CGFloat = 1024
 let image = NSImage(size: NSSize(width: canvas, height: canvas))
 image.lockFocus()
 
-// Rounded-square background with a deep-blue gradient.
+// White rounded-square background.
 let inset: CGFloat = 80
 let bgRect = NSRect(x: inset, y: inset, width: canvas - inset * 2, height: canvas - inset * 2)
 let bgPath = NSBezierPath(roundedRect: bgRect, xRadius: 200, yRadius: 200)
-let gradient = NSGradient(colors: [
-  NSColor(calibratedRed: 0.10, green: 0.19, blue: 0.52, alpha: 1),
-  NSColor(calibratedRed: 0.19, green: 0.42, blue: 0.88, alpha: 1),
-  NSColor(calibratedRed: 0.27, green: 0.60, blue: 0.85, alpha: 1),
-])!
-NSGraphicsContext.saveGraphicsState()
-bgPath.addClip()
-gradient.draw(from: NSPoint(x: canvas / 2, y: 0), to: NSPoint(x: canvas / 2, y: canvas), options: [])
-NSGraphicsContext.restoreGraphicsState()
+NSColor.white.setFill()
+bgPath.fill()
 
-// White SF Symbol sparkles, tinted from its template form.
-if let symbol = NSImage(systemSymbolName: "sparkles", accessibilityDescription: nil) {
-  let symbolSize: CGFloat = 470
-  let symbolRect = NSRect(
-    x: (canvas - symbolSize) / 2,
-    y: (canvas - symbolSize) / 2 + 30,
-    width: symbolSize,
-    height: symbolSize)
-  let tinted = NSImage(size: symbolRect.size)
-  tinted.lockFocus()
-  symbol.draw(in: NSRect(origin: .zero, size: symbolRect.size))
-  NSColor.white.set()
-  NSRect(origin: .zero, size: symbolRect.size).fill(using: .sourceAtop)
-  tinted.unlockFocus()
-  tinted.draw(in: symbolRect)
-}
+// Black whale, centered with a little breathing room inside the tile.
+let pad: CGFloat = 60
+let contentRect = NSRect(
+  x: inset + pad,
+  y: inset + pad,
+  width: canvas - inset * 2 - pad * 2,
+  height: canvas - inset * 2 - pad * 2)
+let whale = whaleBezier(data: whalePathData, contentRect: contentRect)
+NSColor.black.setFill()
+whale.fill()
+
 image.unlockFocus()
 
 let sizes: [(name: String, px: Int)] = [

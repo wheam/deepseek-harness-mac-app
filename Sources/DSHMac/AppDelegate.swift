@@ -119,7 +119,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ServerControllerDelega
     window.styleMask.insert(.fullSizeContentView)
     window.titlebarAppearsTransparent = true
     window.titlebarSeparatorStyle = .none
-    window.titleVisibility = .visible
+    // The page already brands itself; hide the titlebar text so it does not
+    // duplicate the wordmark (the title still shows in Mission Control and
+    // the Dock menu).
+    window.titleVisibility = .hidden
     window.contentViewController = controller
     controller.titlebarHeight = titlebarHeight
     window.minSize = NSSize(width: 960, height: 640)
