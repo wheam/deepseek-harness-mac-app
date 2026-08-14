@@ -92,7 +92,7 @@ NSColor.white.setFill()
 bgPath.fill()
 
 // Black whale, centered with a little breathing room inside the tile.
-let pad: CGFloat = 60
+let pad: CGFloat = 32
 let contentRect = NSRect(
   x: inset + pad,
   y: inset + pad,
@@ -112,14 +112,22 @@ let sizes: [(name: String, px: Int)] = [
   ("icon_512x512.png", 512), ("icon_512x512@2x.png", 1024),
 ]
 for entry in sizes {
-  let px = CGFloat(entry.px)
-  let scaled = NSImage(size: NSSize(width: px, height: px))
-  scaled.lockFocus()
-  image.draw(in: NSRect(x: 0, y: 0, width: px, height: px), from: .zero, operation: .copy, fraction: 1)
-  scaled.unlockFocus()
-  guard let tiff = scaled.tiffRepresentation,
-    let rep = NSBitmapImageRep(data: tiff),
-    let png = rep.representation(using: .png, properties: [:]) else { continue }
+  let px = entry.px
+  // Render into an explicit bitmap at the exact pixel size: NSImage.lockFocus
+  // draws at the screen's scale (2x on Retina), which would silently double
+  // every PNG and leave the small sizes to the system's downscaler.
+  guard let rep = NSBitmapImageRep(
+    bitmapDataPlanes: nil, pixelsWide: px, pixelsHigh: px,
+    bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+    colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0),
+    let context = NSGraphicsContext(bitmapImageRep: rep) else { continue }
+  NSGraphicsContext.saveGraphicsState()
+  NSGraphicsContext.current = context
+  image.draw(in: NSRect(x: 0, y: 0, width: CGFloat(px), height: CGFloat(px)),
+    from: .zero, operation: .copy, fraction: 1)
+  context.flushGraphics()
+  NSGraphicsContext.restoreGraphicsState()
+  guard let png = rep.representation(using: .png, properties: [:]) else { continue }
   try? png.write(to: URL(fileURLWithPath: outDir + "/" + entry.name))
 }
 print("icon iconset written to \(outDir)")
