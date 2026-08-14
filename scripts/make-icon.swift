@@ -45,7 +45,6 @@ func whaleBezier(data: String, contentRect: NSRect) -> NSBezierPath {
 
   let path = NSBezierPath()
   path.windingRule = .nonZero
-  var current = NSPoint.zero
   var subpathStart = NSPoint.zero
   while index < chars.count {
     let char = chars[index]
@@ -58,7 +57,6 @@ func whaleBezier(data: String, contentRect: NSRect) -> NSBezierPath {
     case "M":
       if let point = nextPoint() {
         path.move(to: point)
-        current = point
         subpathStart = point
       } else {
         index += 1 // malformed data: skip one char instead of looping
@@ -66,13 +64,11 @@ func whaleBezier(data: String, contentRect: NSRect) -> NSBezierPath {
     case "C":
       if let control1 = nextPoint(), let control2 = nextPoint(), let point = nextPoint() {
         path.curve(to: point, controlPoint1: control1, controlPoint2: control2)
-        current = point
       } else {
         index += 1
       }
     case "Z":
       path.close()
-      current = subpathStart
     default:
       index += 1 // stray character: skip it
     }

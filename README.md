@@ -1,54 +1,57 @@
-# DeepSeek Harness — macOS 原生壳
+# DeepSeek Harness for macOS
 
-一个零外部依赖的原生 macOS App（Swift + AppKit + WKWebView）。双击打开后，
-它自动拉起（或复用）`dsh web` 服务，用标准 macOS 原生窗口展示现有 Web GUI；
-**页面 UI 零改动**，壳本身只提供原生窗口、菜单栏和进程保活。
+<p align="center">
+  <img src="resources/app-icon-preview.png" width="160" alt="App icon: the black DeepSeek whale on a white rounded tile">
+</p>
 
-本目录是独立项目：源码自维护（自带 git 仓库），不依赖 deepseek-harness
-仓库的任何源码。App 运行时使用 npm 安装的 `dsh` CLI
-（`npm i -g @deepseek-ai/dsh`，或自动回退到 `~/.npm/_npx` 缓存）。
+<p align="center"><strong>中文</strong> | <a href="#english">English</a></p>
 
-## 行为约定（按 macOS 惯例）
+一个零第三方依赖的原生 macOS App（Swift + AppKit + WKWebView）：双击即用 DeepSeek Harness 的浏览器界面——App 自动拉起（或复用）`dsh web` 服务，用标准 macOS 原生窗口展示现有 Web GUI，**页面 UI 零改动**，壳本身只提供原生窗口、菜单栏、进程保活和与页面视觉完全贴合的标题栏。
 
-- **双击 App**：自动探测 `127.0.0.1:3080`。
-  - 已有 `dsh web` 在跑 → 直接复用（窗口里就是那个页面），退出时不碰它；
-  - 没有 → App 作为子进程拉起 `dsh web`（经登录 shell，继承 `~/.zshrc` 等环境），
+## 中文
+
+### 它能做什么
+
+- **双击打开即用**：自动探测 `127.0.0.1:3080`
+  - 已有 `dsh web` 在跑 → 直接复用（窗口里就是那个页面），退出时绝不碰它；
+  - 没有 → 作为子进程拉起 `dsh web`（经登录 shell，继承 `~/.zshrc` 等环境），
     解析 `dsh web: http://127.0.0.1:<port>` 就绪行后加载页面；
   - 端口被其他程序占用 → 换一个系统分配的空闲端口。
-- **Cmd+W / 红灯关窗**：只关窗口，App 留在 Dock、服务继续运行；
-  点 Dock 图标重新弹出窗口（页面状态保留）。
-- **Cmd+Q / 退出**：App 退出，并优雅停止**它自己拉起**的服务（SIGTERM，7 秒兜底 SIGKILL）；
-  复用的既有服务永不误杀。
-- **保活**：服务意外崩溃后 2 秒自动重启（60 秒内最多 3 次，超过弹窗报错）。
-- **单实例**：重复双击聚焦已有窗口，不会起第二个服务。
+- **符合 macOS 惯例的窗口行为**
+  - Cmd+W / 红灯关窗：只关窗口，App 留在 Dock、服务继续运行；点 Dock 图标窗口回来（页面状态保留）；
+  - Cmd+Q 退出：优雅停止**它自己拉起**的服务（SIGTERM，7 秒兜底 SIGKILL）；复用的既有服务永不误杀。
+- **保活**：拉起的服务意外崩溃后 2 秒自动重启（60 秒内最多 3 次，超过弹窗报错）。
+- **单实例**：重复双击只聚焦已有窗口，不会起第二个服务。
 - **未安装 dsh**：弹原生对话框，可一键 `npm i -g @deepseek-ai/dsh`。
-- 外部链接、`target="_blank"` 一律交给默认浏览器，不会顶掉 App 内页面。
-- 菜单栏提供：关于 / 退出、编辑（撤销/剪贴板）、重新加载 (⌘R)、在浏览器中打开 (⇧⌘O)、窗口。
-- 标题栏为双色自绘条带：左侧取页面侧栏色、右侧取内容底色、中间画页面同款 1px 分界线，
-  宽度实时跟随侧栏（折叠/拖拽），颜色与深浅主题随页面自动跟随；无标题栏分割线，
-  隐藏标题文字（页面自带品牌，避免重复），保留红绿灯。
-- 图标为白底黑鲸鱼 DeepSeek logo（路径取自 dsh web 的 favicon）。
+- **与页面视觉贴合的标题栏**：无分割线、无标题文字的双色自绘条带——左侧取页面侧栏色、右侧取内容底色、
+  中间画页面同款 1px 分界线，宽度实时跟随侧栏（折叠/拖拽），颜色与深浅主题随页面自动跟随
+  （采样页面的 `--dsw-specific-sidebar-fill` / `--dsw-alias-bg-base` / `--dsw-alias-border-l1` 设计令牌，令牌缺失时回退系统样式）。
+- **外部链接**一律交给默认浏览器，不会顶掉壳内页面；`target="_blank"` 同样外投。
+- 菜单栏：关于 / 退出、编辑（撤销/剪贴板）、重新加载 (⌘R)、在浏览器中打开 (⇧⌘O)、窗口。
+- **图标**：白底黑鲸鱼 DeepSeek logo（路径取自 dsh web 官方 favicon，构建时由脚本生成；
+  现成的 `resources/AppIcon.icns` 也在仓库里）。
 
 日志：`~/Library/Logs/DeepSeekHarness/deepseek-harness.log`。
 
-## 构建
+### 环境要求
 
-要求：Xcode 命令行工具（`swift`、`iconutil`），无需任何第三方依赖。
+- macOS 13+（Apple Silicon 与 Intel 均可）
+- Xcode 命令行工具（`swift`、`iconutil`）——仅构建时需要
+- DeepSeek Harness CLI：`npm i -g @deepseek-ai/dsh`（未安装时 App 会弹窗引导一键安装）
 
-```sh
-./build.sh
-# 产物：dist/DeepSeek Harness.app
-```
-
-## 运行
+### 快速开始
 
 ```sh
-open "dist/DeepSeek Harness.app"
-# 或安装到应用程序目录（推荐，启动器只认这里）：
+git clone https://github.com/wheam/deepseek-harness-mac-app.git
+cd deepseek-harness-mac-app
+./build.sh                                  # 产物：dist/DeepSeek Harness.app
 cp -R "dist/DeepSeek Harness.app" ~/Applications/
+open -a "DeepSeek Harness"
 ```
 
-也可直接跑二进制并传调试参数（`open -a "DeepSeek Harness" --args ...`）：
+### 调试参数
+
+`open -a "DeepSeek Harness" --args ...`：
 
 | 参数 | 作用 |
 | --- | --- |
@@ -59,31 +62,7 @@ cp -R "dist/DeepSeek Harness.app" ~/Applications/
 | `--direct` | 不走登录 shell，直接执行 dsh |
 | `--log <path>` | 日志文件路径 |
 
-## 设计决策（为什么这样做）
-
-- **Swift + WKWebView 而非 Tauri**：同一个 WKWebView 壳，Tauri 还需 Rust 工具链和更重的构建链，
-  而 Swift/AppKit 每台 Mac 随 Xcode 附带。
-- **不用 Electron**：非原生、体积大，与原生 macOS 设计相悖。
-- **不用 LaunchAgent + Safari PWA**：零原生代码但无真正的 App 包、图标、单实例窗口管理与进程生命周期控制。
-- **attach 优先而非总是新起服务**：避免与用户已有实例产生重复服务与页面；
-  以页面标题标记探测识别 dsh web，仅在无人应答时才拉起。
-- **WKWebView 只在主线程操作**：URLSession 探测回调先跳回主队列再通知 delegate，
-  页面加载入口再做一次主线程检查（第一版曾因后台线程加载页面触发 WebKit SIGTRAP 崩溃）。
-- **标题栏双色条带**：页面左右分栏颜色不同且用户可见极小的色差，任何单色条带都只能对齐一边，
-  因此壳自绘双色条带——左段取 `--dsw-specific-sidebar-fill`、右段取 `--dsw-alias-bg-base`、
-  分界线取 `--dsw-alias-border-l1`，侧栏宽度由注入脚本实测（折叠/拖拽实时跟随）；
-  主题与深浅由 `data-ds-dark-theme` 同步，令牌缺失时回退系统窗口色。
-- **默认工作目录为用户主目录**：与 `dsh web` 终端手启一致；可用 `--cwd` 覆盖。
-
-## 说明
-
-- App 未开沙箱（无 entitlements），否则无法管理子进程；本地产物 ad-hoc 签名，
-  可直接运行，不触发 Gatekeeper 隔离。
-- 开机自启可手动在「系统设置 → 通用 → 登录项」里添加本 App（可选）。
-- 若构建产物被 `open` 启动过，会被 macOS 启动器（Launchpad/聚焦）登记；
-  日常请只从 `~/Applications` 打开，避免启动器出现两个同名图标。
-
-## 结构
+### 结构
 
 ```
 Package.swift                     SPM 包（macOS 13+，无外部依赖）
@@ -92,9 +71,119 @@ Sources/DSHMac/
   LaunchOptions.swift             命令行参数
   AppLog.swift                    文件日志
   ServerController.swift          dsh 探测/拉起/就绪/保活/停止
-  WebViewController.swift         WKWebView + 加载状态层
+  WebViewController.swift         WKWebView + 双色标题栏 + 主题同步
   AppDelegate.swift               窗口、菜单、单实例、安装流程
 Info.plist
-scripts/make-icon.swift           图标生成（白底黑鲸鱼 DeepSeek logo）
+resources/AppIcon.icns            现成的应用图标（构建时会重新生成）
+resources/app-icon-preview.png    图标预览
+scripts/make-icon.swift           图标生成（白底黑鲸鱼）
 build.sh                          构建并组装 .app（ad-hoc 签名）
 ```
+
+### 设计决策（为什么这样做）
+
+- **Swift + WKWebView 而非 Tauri**：同一个 WKWebView 壳，Tauri 还需 Rust 工具链和更重的构建链，而 Swift/AppKit 每台 Mac 随 Xcode 附带。
+- **不用 Electron**：非原生、体积大，与原生 macOS 设计相悖。
+- **不用 LaunchAgent + Safari PWA**：零原生代码，但无真正的 App 包、图标、单实例窗口管理与进程生命周期控制。
+- **attach 优先而非总是新起服务**：避免与用户已有实例产生重复服务与页面；以页面标题标记探测识别 dsh web，仅在无人应答时才拉起。
+- **双色标题栏而非单色**：页面左右分栏颜色不同，单色条带只能对齐一边；自绘双色条带让窗口顶部成为页面分栏的连续延伸。
+- **WKWebView 只在主线程操作**：URLSession 探测回调先跳回主队列再通知 delegate（第一版曾因后台线程加载页面触发 WebKit SIGTRAP 崩溃）。
+
+### 说明
+
+- App 未开沙箱（无 entitlements），否则无法管理子进程；本地产物 ad-hoc 签名，可直接运行，不触发 Gatekeeper 隔离。
+- 开机自启：在「系统设置 → 通用 → 登录项」里手动添加本 App。
+- 若构建产物曾被 `open` 启动，会被 macOS 启动器登记，可能出现两个同名图标；日常只从 `~/Applications` 打开即可。
+
+---
+
+<a name="english"></a>
+
+## English
+
+A native macOS app for the [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) web GUI, built with Swift + AppKit + WKWebView and zero third-party dependencies. Double-click to run: the app starts (or reuses) `dsh web`, keeps it alive, and shows the stock web UI inside a native window — the page itself is never modified.
+
+### What it does
+
+- **Double-click and go**: probes `127.0.0.1:3080`
+  - a running `dsh web` is reused as-is and never touched on quit;
+  - otherwise the app spawns `dsh web` as a child process (through the login shell, inheriting `~/.zshrc` etc.) and loads the page once the `dsh web: http://127.0.0.1:<port>` readiness line appears;
+  - a port occupied by something else falls back to an OS-assigned port.
+- **macOS-native window behavior**
+  - Cmd+W / the red traffic light closes only the window; the app and the server stay alive in the Dock, and clicking the Dock icon restores the window with page state intact;
+  - Cmd+Q quits the app and gracefully stops the server it spawned (SIGTERM, SIGKILL after 7s); an attached pre-existing server is never killed.
+- **Keep-alive**: a spawned server that crashes restarts after 2s (up to 3 times per 60s, then the app reports).
+- **Single instance**: launching again just focuses the existing window.
+- **One-click install**: when no `dsh` binary is found, the app offers `npm i -g @deepseek-ai/dsh` natively.
+- **Titlebar that continues the page layout**: a separator-free, title-less two-tone strip painted with the page's own design tokens — sidebar color over the sidebar width, content color over the rest, and the page's 1px column border between them. The split follows sidebar collapse/drag live and both colors follow the page's light/dark theme (falls back to the system look if the tokens disappear in a future dsh build).
+- **External links** (including `target="_blank"`) open in the default browser instead of replacing the shell page.
+- Menu bar: About / Quit, Edit (undo/clipboard), Reload (⌘R), Open in Browser (⇧⌘O), Window.
+- **Icon**: the black DeepSeek whale on a white tile — the path is the official dsh web favicon path, rendered at build time (`scripts/make-icon.swift`); a ready-made `resources/AppIcon.icns` is committed too.
+
+Logs: `~/Library/Logs/DeepSeekHarness/deepseek-harness.log`.
+
+### Requirements
+
+- macOS 13+ (Apple Silicon and Intel)
+- Xcode Command Line Tools (`swift`, `iconutil`) — build time only
+- DeepSeek Harness CLI: `npm i -g @deepseek-ai/dsh` (the app guides a one-click install otherwise)
+
+### Quick start
+
+```sh
+git clone https://github.com/wheam/deepseek-harness-mac-app.git
+cd deepseek-harness-mac-app
+./build.sh                                  # produces dist/DeepSeek Harness.app
+cp -R "dist/DeepSeek Harness.app" ~/Applications/
+open -a "DeepSeek Harness"
+```
+
+### Debug flags
+
+Passed via `open -a "DeepSeek Harness" --args ...`:
+
+| Flag | Effect |
+| --- | --- |
+| `--port <n>` | force the server port (default: probe 3080) |
+| `--spawn` | always spawn a fresh `dsh web`, never attach |
+| `--cwd <dir>` | working directory for the spawned server (default: `$HOME`) |
+| `--dsh <path>` | explicit `dsh` binary path |
+| `--direct` | run dsh directly instead of through the login shell |
+| `--log <path>` | log file path |
+
+### Layout
+
+```
+Package.swift                     Swift package (macOS 13+, no dependencies)
+Sources/DSHMac/
+  main.swift                      entry point
+  LaunchOptions.swift             command-line flags
+  AppLog.swift                    file logging
+  ServerController.swift          dsh probe/spawn/readiness/keep-alive/stop
+  WebViewController.swift         WKWebView + two-tone titlebar + theme sync
+  AppDelegate.swift               window, menus, single instance, install flow
+Info.plist
+resources/AppIcon.icns            ready-made app icon (regenerated on build)
+resources/app-icon-preview.png    icon preview
+scripts/make-icon.swift           icon generator (black whale on white)
+build.sh                          builds and assembles the .app (ad-hoc signed)
+```
+
+### Design decisions
+
+- **Swift + WKWebView rather than Tauri**: the same WKWebView shell without a Rust toolchain; Swift/AppKit ships with Xcode on every Mac.
+- **Not Electron**: not native, much larger, contradicts the native macOS look.
+- **Not a LaunchAgent + Safari PWA**: no real app bundle, icon, single-instance window management, or server lifecycle control.
+- **Attach-first rather than always spawning**: avoids duplicate servers and pages when one is already running; a title-marker probe identifies dsh web, and a new server is spawned only when nothing answers.
+- **Two-tone titlebar rather than a single color**: the page's two columns have different backgrounds, so one color can only match one side; the self-painted strip makes the window top a seamless continuation of the page layout.
+- **WKWebView only on the main thread**: the URLSession probe completion hops to the main queue before any delegate call (the first build crashed with a WebKit SIGTRAP for loading the page off the main thread).
+
+### Notes
+
+- The app is not sandboxed (no entitlements), because it manages child processes; local builds are ad-hoc signed and run without Gatekeeper prompts.
+- Launch at login: add the app manually in System Settings → General → Login Items.
+- If a build artifact was ever launched with `open`, macOS registers it with the launcher and you may see two same-named icons; just always open the copy in `~/Applications`.
+
+## License
+
+MIT — see [LICENSE](LICENSE). The whale logo path comes from the [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) web favicon and follows that project's licensing.
