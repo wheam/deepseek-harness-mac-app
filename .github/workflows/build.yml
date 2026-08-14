@@ -1,0 +1,50 @@
+name: Build and Release
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build universal app bundle
+        run: UNIVERSAL=1 ./build.sh
+
+      - name: Package zip
+        run: |
+          cd dist
+          ditto -c -k --sequesterRsrc --keepParent "DeepSeek Harness.app" DeepSeek-Harness.zip
+          cd ..
+          mv "dist/DeepSeek Harness.zip" .
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: DeepSeek-Harness
+          path: DeepSeek-Harness.zip
+          if-no-files-found: error
+
+      - name: Publish tag release
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release create "$GITHUB_REF_NAME" DeepSeek-Harness.zip --generate-notes
+
+      - name: Publish rolling "latest" release
+        if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release delete latest --yes --cleanup-tag || true
+          gh release create latest DeepSeek-Harness.zip \
+            --title "Latest build" \
+            --notes "Automatically built from the default branch. Universal (Apple Silicon + Intel), ad-hoc signed. First launch: right-click the app and choose Open, or run: xattr -dr com.apple.quarantine \"/Applications/DeepSeek Harness.app\"" \
+            --prerelease

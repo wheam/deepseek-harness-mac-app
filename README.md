@@ -8,6 +8,14 @@
 
 一个零第三方依赖的原生 macOS App（Swift + AppKit + WKWebView）：双击即用 DeepSeek Harness 的浏览器界面——App 自动拉起（或复用）`dsh web` 服务，用标准 macOS 原生窗口展示现有 Web GUI，**页面 UI 零改动**，壳本身只提供原生窗口、菜单栏、进程保活和与页面视觉完全贴合的标题栏。
 
+## 界面预览 / Screenshots
+
+| 浅色 | 深色 |
+| --- | --- |
+| ![浅色主题窗口](screenshots/app-window.png) | ![深色主题窗口](screenshots/app-window-dark.png) |
+
+标题栏无分割线、无文字，双色条带与页面左右分栏完全连续（左侧侧栏色、右侧内容色、中间 1px 分界线随侧栏宽度实时移动）。截图中的会话内容为占位文本，不包含任何真实数据。
+
 ## 中文
 
 ### 它能做什么
@@ -48,6 +56,16 @@ cd deepseek-harness-mac-app
 cp -R "dist/DeepSeek Harness.app" ~/Applications/
 open -a "DeepSeek Harness"
 ```
+
+### 下载现成 App（无需 Xcode）
+
+不想装构建工具的直接下载 CI 自动构建的成品（universal：Apple Silicon 与 Intel 通用）：
+
+1. 打开 [Releases](https://github.com/wheam/deepseek-harness-mac-app/releases) 页，下载最新版的 `DeepSeek-Harness.zip`
+   （[latest 滚动构建](https://github.com/wheam/deepseek-harness-mac-app/releases/tag/latest) 总是跟随 main 分支）；
+2. 解压，把 `DeepSeek Harness.app` 拖入 `/Applications`（或 `~/Applications`）；
+3. 首次打开：App 是 ad-hoc 签名，**右键点击 → 打开**即可放行；
+   或先运行：`xattr -dr com.apple.quarantine "/Applications/DeepSeek Harness.app"`。
 
 ### 调试参数
 
@@ -137,6 +155,16 @@ cd deepseek-harness-mac-app
 cp -R "dist/DeepSeek Harness.app" ~/Applications/
 open -a "DeepSeek Harness"
 ```
+
+### Download a ready-made app (no Xcode needed)
+
+Skip building entirely and grab the CI-built universal bundle (Apple Silicon + Intel):
+
+1. Open the [Releases](https://github.com/wheam/deepseek-harness-mac-app/releases) page and download the latest `DeepSeek-Harness.zip`
+   (the [rolling "latest" build](https://github.com/wheam/deepseek-harness-mac-app/releases/tag/latest) always tracks the main branch);
+2. Unzip and drag `DeepSeek Harness.app` into `/Applications` (or `~/Applications`);
+3. First launch: the app is ad-hoc signed, so **right-click → Open** to allow it,
+   or run: `xattr -dr com.apple.quarantine "/Applications/DeepSeek Harness.app"`.
 
 ### Debug flags
 
