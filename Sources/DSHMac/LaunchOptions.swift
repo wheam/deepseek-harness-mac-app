@@ -17,11 +17,15 @@ struct LaunchOptions: CustomStringConvertible {
   var direct = false
   /// Log file path (default: ~/Library/Logs/DeepSeekHarness/deepseek-harness.log).
   var logPath: String?
+  /// Screenshot aid: replace every page text node with placeholder content.
+  var shotScrub = false
+  /// Screenshot aid: force the page (and the shell) into the dark theme.
+  var shotDark = false
 
   var description: String {
     "LaunchOptions(port: \(port.map(String.init) ?? "nil"), forceSpawn: \(forceSpawn),"
       + " cwd: \(cwd ?? "nil"), dshPath: \(dshPath ?? "nil"), direct: \(direct),"
-      + " logPath: \(logPath ?? "nil"))"
+      + " logPath: \(logPath ?? "nil"), shotScrub: \(shotScrub), shotDark: \(shotDark))"
   }
 
   /// Parse the process arguments, skipping the executable path at index 0.
@@ -49,6 +53,10 @@ struct LaunchOptions: CustomStringConvertible {
         options.direct = true
       case "--log":
         options.logPath = takeValue()
+      case "--shot-scrub":
+        options.shotScrub = true
+      case "--shot-dark":
+        options.shotDark = true
       case "--help":
         print(Self.helpText)
         exit(0)

@@ -59,6 +59,37 @@ final class WebViewController: NSViewController, WKNavigationDelegate, WKUIDeleg
   private var appliedState: (String, String, String, Bool, Double)?
   private let themeProxy: ThemeMessageProxy
 
+  /// Screenshot aids (only active with explicit launch flags): scrub every
+  /// text node to placeholder content and/or force the dark page theme.
+  var scrubForScreenshot = false
+  var shotDark = false
+
+  /// Placeholder copy used by `--shot-scrub`: varied, natural-looking text so
+  /// screenshots keep the real layout without carrying any real data.
+  private static let screenshotScrubScript = """
+  (() => {
+    const long = [
+      '这是一个用于展示界面外观的示例消息，全部文字均为占位内容。',
+      'DeepSeek Harness 是插件化的智能体框架，本截图不包含任何真实数据。',
+      '这里原本是一条真实消息；为了截图，它已被替换成这段示例文本。',
+      '示例说明：所有会话内容、标题与配置信息都不会出现在截图中。',
+    ];
+    const mid = ['示例会话标题', '演示项目', '示例消息', '示例说明'];
+    const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+    const nodes = [];
+    while (walker.nextNode()) nodes.push(walker.currentNode);
+    let i = 0;
+    for (const n of nodes) {
+      const t = (n.nodeValue || '').trim();
+      if (!t) continue;
+      n.nodeValue = t.length > 30 ? long[i++ % long.length] : (t.length > 6 ? mid[i++ % mid.length] : '示例');
+    }
+    document.querySelectorAll('input, textarea').forEach((e) => { e.value = ''; });
+    document.querySelectorAll('[contenteditable]').forEach((e) => { e.textContent = ''; });
+    return nodes.length;
+  })()
+  """
+
   private static let loopbackHosts: Set<String> = ["127.0.0.1", "localhost", "[::1]", "harness.internal"]
   private static let themeMessageName = "dshTheme"
 
@@ -322,7 +353,12 @@ final class WebViewController: NSViewController, WKNavigationDelegate, WKUIDeleg
     stripBorder.layer?.backgroundColor = (Self.parseRgbColor(borderColorString) ?? NSColor.separatorColor).cgColor
     stripBorder.isHidden = false
     window.backgroundColor = contentColor
-    window.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
+    // Screenshot dark mode keeps the window appearance as-is: flipping the
+    // appearance (or starting dark) leaves this WKWebView rendering a blank
+    // surface, while the page's own attribute-driven dark theme renders fine.
+    if !shotDark {
+      window.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
+    }
     AppLog.shared.info("webview: theme synced (dark=\(dark), sidebar=\(sidebarColorString), content=\(contentColorString), width=\(sidebarWidth))")
     if widthChanged { view.needsLayout = true }
   }
@@ -345,6 +381,21 @@ final class WebViewController: NSViewController, WKNavigationDelegate, WKUIDeleg
     hasLoadedOnce = true
     hideOverlay()
     samplePageTheme()
+    guard scrubForScreenshot else { return }
+    let scrub: () -> Void = { [weak self] in
+      self?.webView.evaluateJavaScript(Self.screenshotScrubScript, completionHandler: nil)
+    }
+    // Two scrub passes with a pause: late-rendered lists get scrubbed too.
+    DispatchQueue.main.asyncAfter(deadline: .now() + 0.8, execute: scrub)
+    DispatchQueue.main.asyncAfter(deadline: .now() + 2.0, execute: scrub)
+    guard shotDark else { return }
+    // Switch the page theme only after the scrubbing settled: the page's
+    // dark theme is keyed on this attribute, and the reporter then repaints
+    // the strip with the dark tokens (window appearance stays untouched).
+    DispatchQueue.main.asyncAfter(deadline: .now() + 3.5) { [weak self] in
+      self?.webView.evaluateJavaScript(
+        "document.body.setAttribute('data-ds-dark-theme', '')", completionHandler: nil)
+    }
   }
 
   func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {

@@ -100,6 +100,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ServerControllerDelega
     let controller = WebViewController()
     controller.onRetry = { [weak self] in self?.server.start() }
     controller.onOpenExternal = { url in NSWorkspace.shared.open(url) }
+    controller.scrubForScreenshot = options.shotScrub
+    controller.shotDark = options.shotDark
     webVC = controller
 
     let window = NSWindow(

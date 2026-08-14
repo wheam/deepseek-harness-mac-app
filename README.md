@@ -79,6 +79,8 @@ open -a "DeepSeek Harness"
 | `--dsh <path>` | 指定 `dsh` 可执行文件路径 |
 | `--direct` | 不走登录 shell，直接执行 dsh |
 | `--log <path>` | 日志文件路径 |
+| `--shot-scrub` | 截图辅助：把页面全部文字替换为占位内容 |
+| `--shot-dark` | 截图辅助：把页面切到深色主题 |
 
 ### 结构
 
@@ -178,6 +180,8 @@ Passed via `open -a "DeepSeek Harness" --args ...`:
 | `--dsh <path>` | explicit `dsh` binary path |
 | `--direct` | run dsh directly instead of through the login shell |
 | `--log <path>` | log file path |
+| `--shot-scrub` | screenshot aid: replace all page text with placeholders |
+| `--shot-dark` | screenshot aid: switch the page to the dark theme |
 
 ### Layout
 
