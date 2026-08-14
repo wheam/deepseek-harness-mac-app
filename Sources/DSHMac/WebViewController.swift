@@ -1,9 +1,21 @@
 import AppKit
 import WebKit
 
+/// Weak-indirection script-message handler: `WKUserContentController` retains
+/// its handlers, so forwarding through a proxy avoids a retain cycle with the
+/// owning view controller.
+final class ThemeMessageProxy: NSObject, WKScriptMessageHandler {
+  weak var owner: WebViewController?
+
+  func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+    owner?.handleThemeMessage(message)
+  }
+}
+
 /// The native window content: a WKWebView filling the window, with a minimal
 /// native loading overlay. The page inside is the stock dsh web UI — this
-/// class never alters it.
+/// class never alters it. It does sample the page's design tokens to keep the
+/// transparent titlebar strip the same color as the page's sidebar.
 final class WebViewController: NSViewController, WKNavigationDelegate, WKUIDelegate {
   let webView: WKWebView
 
@@ -18,15 +30,54 @@ final class WebViewController: NSViewController, WKNavigationDelegate, WKUIDeleg
   private let retryButton = NSButton(title: "重试", target: nil, action: nil)
   private var targetURL: URL?
   private var hasLoadedOnce = false
+  private let themeProxy: ThemeMessageProxy
 
   private static let loopbackHosts: Set<String> = ["127.0.0.1", "localhost", "[::1]", "harness.internal"]
+  private static let themeMessageName = "dshTheme"
+
+  /// Page-side reporter: samples the sidebar fill token and the dark-theme
+  /// attribute, and posts both whenever the body attributes change.
+  private static let themeScript = WKUserScript(
+    source: """
+    (function () {
+      const h = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.dshTheme;
+      if (!h) return;
+      const report = function () {
+        const body = document.body;
+        if (!body) return;
+        let color = '';
+        try { color = getComputedStyle(body).getPropertyValue('--dsw-specific-sidebar-fill').trim(); } catch (e) {}
+        const dark = body.hasAttribute('data-ds-dark-theme');
+        h.postMessage(JSON.stringify({ color: color, dark: dark }));
+      };
+      const safe = function () { try { report(); } catch (e) {} };
+      if (document.body) { safe(); } else { document.addEventListener('DOMContentLoaded', safe); }
+      setTimeout(safe, 300);
+      setTimeout(safe, 1200);
+      const observe = function () {
+        if (!document.body) return;
+        new MutationObserver(safe).observe(document.body, { attributes: true });
+      };
+      if (document.body) { observe(); } else { document.addEventListener('DOMContentLoaded', observe); }
+    })();
+    """,
+    injectionTime: .atDocumentEnd,
+    forMainFrameOnly: true)
 
   init() {
+    let proxy = ThemeMessageProxy()
     let configuration = WKWebViewConfiguration()
     // Default store: localStorage/session data persist across launches.
     configuration.websiteDataStore = .default()
-    webView = WKWebView(frame: .zero, configuration: configuration)
+    let userContent = WKUserContentController()
+    userContent.add(proxy, name: Self.themeMessageName)
+    userContent.addUserScript(Self.themeScript)
+    configuration.userContentController = userContent
+    let webView = WKWebView(frame: .zero, configuration: configuration)
+    self.webView = webView
+    self.themeProxy = proxy
     super.init(nibName: nil, bundle: nil)
+    proxy.owner = self
     webView.navigationDelegate = self
     webView.uiDelegate = self
     if #available(macOS 13.3, *) { webView.isInspectable = true }
@@ -116,11 +167,83 @@ final class WebViewController: NSViewController, WKNavigationDelegate, WKUIDeleg
     }
   }
 
+  // MARK: - Titlebar theme sync
+
+  /// Entry point for the page-side reporter (called on the main thread).
+  func handleThemeMessage(_ message: WKScriptMessage) {
+    guard message.name == Self.themeMessageName else { return }
+    handleThemePayload(message.body)
+  }
+
+  /// Re-sample the page tokens after a finished navigation (belt and
+  /// suspenders on top of the injected reporter).
+  private func samplePageTheme() {
+    let js = """
+    (() => {
+      const body = document.body;
+      if (!body) return null;
+      let color = '';
+      try { color = getComputedStyle(body).getPropertyValue('--dsw-specific-sidebar-fill').trim(); } catch (e) {}
+      return JSON.stringify({ color: color, dark: body.hasAttribute('data-ds-dark-theme') });
+    })()
+    """
+    webView.evaluateJavaScript(js) { [weak self] result, _ in
+      guard let payload = result as? String else { return }
+      self?.handleThemePayload(payload)
+    }
+  }
+
+  private func handleThemePayload(_ body: Any) {
+    guard let payload = body as? String,
+      let data = payload.data(using: .utf8),
+      let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+      AppLog.shared.info("webview: unparsable theme payload")
+      return
+    }
+    let colorString = json["color"] as? String ?? ""
+    let dark = json["dark"] as? Bool ?? false
+    applyPageTheme(colorString: colorString, dark: dark)
+  }
+
+  /// Paint the transparent-titlebar strip with the page's sidebar color and
+  /// match the window appearance to the page theme, so the title text and
+  /// traffic lights keep contrast in both light and dark pages.
+  private func applyPageTheme(colorString: String, dark: Bool) {
+    guard let window = view.window else {
+      AppLog.shared.info("webview: theme payload before window attach; skipped")
+      return
+    }
+    if let color = Self.parseRgbColor(colorString) {
+      window.backgroundColor = color
+      window.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
+      AppLog.shared.info("webview: theme synced (dark=\(dark), color=\(colorString))")
+    } else {
+      // The sidebar token is missing or renamed in this dsh build: fall back
+      // to the system window look instead of guessing a color.
+      window.backgroundColor = .windowBackgroundColor
+      window.appearance = nil
+      AppLog.shared.info("webview: sidebar token unavailable; using system window background")
+    }
+  }
+
+  /// Parse a CSS color string: `rgb(r, g, b)`, `rgb(r g b)`, or `rgba(...)`.
+  static func parseRgbColor(_ string: String) -> NSColor? {
+    let cleaned = string.trimmingCharacters(in: .whitespaces)
+    guard (cleaned.hasPrefix("rgb(") || cleaned.hasPrefix("rgba(")) && cleaned.hasSuffix(")"),
+      let open = cleaned.firstIndex(of: "(") else { return nil }
+    let inner = cleaned[cleaned.index(after: open)..<cleaned.index(before: cleaned.endIndex)]
+    let parts = inner.split { $0 == "," || $0.isWhitespace }.compactMap { Double($0) }
+    guard parts.count >= 3, parts[0] <= 255, parts[1] <= 255, parts[2] <= 255 else { return nil }
+    let alpha = parts.count >= 4 ? min(max(parts[3], 0), 1) : 1
+    return NSColor(calibratedRed: parts[0] / 255, green: parts[1] / 255, blue: parts[2] / 255, alpha: alpha)
+  }
+
   // MARK: - WKNavigationDelegate
 
   func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
     hasLoadedOnce = true
     hideOverlay()
+    samplePageTheme()
   }
 
   func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {

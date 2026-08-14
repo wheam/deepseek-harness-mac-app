@@ -139,7 +139,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ServerControllerDelega
   /// Post a show-window request to an already-running instance and report
   /// whether this process should exit.
   private func handleSingleInstance() -> Bool {
-    let bundleID = Bundle.main.bundleIdentifier
+    // A bare-binary run (no bundle) has no identity to compare; without this
+    // guard, `bundleIdentifier == nil` would match every unrelated daemon.
+    guard let bundleID = Bundle.main.bundleIdentifier, !bundleID.isEmpty else {
+      return false
+    }
     let others = NSWorkspace.shared.runningApplications.filter {
       $0.bundleIdentifier == bundleID
         && $0.processIdentifier != ProcessInfo.processInfo.processIdentifier
