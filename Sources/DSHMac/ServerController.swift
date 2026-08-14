@@ -1,0 +1,354 @@
+import Darwin
+import Foundation
+
+/// What a loopback probe found on the target port.
+enum ProbeResult {
+  /// A live dsh web instance (identified by its served page marker).
+  case dshReady(port: Int)
+  /// Something else is listening.
+  case otherService
+  /// Nothing is listening.
+  case free
+}
+
+/// Events the server controller reports to the UI layer (main thread).
+protocol ServerControllerDelegate: AnyObject {
+  /// Status text for the loading overlay.
+  func serverController(_ controller: ServerController, didUpdateStatus status: String)
+  /// The web server is bound; load this URL.
+  func serverController(_ controller: ServerController, didBecomeReady url: URL)
+  /// Startup failed or the server kept crashing; `message` is user-facing.
+  func serverController(_ controller: ServerController, didFail message: String, canInstallDsh: Bool)
+}
+
+/// Owns the `dsh web` child process: binary resolution, attach-or-spawn
+/// startup, readiness detection, crash restart, and graceful teardown.
+final class ServerController {
+  /// Ready line dsh prints after the Loader settles and the server binds:
+  /// `dsh web: http://127.0.0.1:<port>`.
+  static let readyPattern = try! NSRegularExpression(
+    pattern: #"dsh web: http://127\.0\.0\.1:(\d+)"#)
+
+  let options: LaunchOptions
+  weak var delegate: ServerControllerDelegate?
+
+  /// The URL of the current web server (spawned or attached), when known.
+  private(set) var serverURL: URL?
+  /// The child process this app spawned; nil when attached to an existing server.
+  private(set) var spawnedProcess: Process?
+
+  private var stopping = false
+  private var restartAttempts = 0
+  private var restartWindowStart = Date.distantPast
+  private var readyTimeoutWork: DispatchWorkItem?
+  private var stdoutBuffer = Data()
+  private var stderrBuffer = Data()
+  private let ioQueue = DispatchQueue(label: "com.deepseek-ai.harness.server-io")
+  private var logTail: [String] = []
+
+  init(options: LaunchOptions) {
+    self.options = options
+  }
+
+  // MARK: - Startup
+
+  /// Begin the startup sequence: probe the target port, attach to a live dsh
+  /// web, or spawn a new one.
+  func start() {
+    stopping = false
+    let targetPort = options.port ?? 3080
+    let forced = options.port != nil
+    AppLog.shared.info("server: start; target port \(targetPort), forceSpawn=\(options.forceSpawn)")
+    delegate?.serverController(self, didUpdateStatus: options.forceSpawn
+      ? "正在启动本地服务…"
+      : "正在检查本地服务…")
+    probe(port: targetPort) { [weak self] result in
+      guard let self else { return }
+      switch result {
+      case .dshReady(let port):
+        if self.options.forceSpawn {
+          AppLog.shared.info("server: port \(port) already serves dsh web; spawning on an OS-assigned port instead")
+          self.spawn(port: 0)
+        } else {
+          self.attach(port: port)
+        }
+      case .free:
+        self.spawn(port: forced ? targetPort : nil)
+      case .otherService:
+        if forced {
+          AppLog.shared.error("server: port \(targetPort) is used by a non-dsh service; spawning on an OS-assigned port")
+          self.spawn(port: 0)
+        } else {
+          self.delegate?.serverController(self, didFail:
+            "端口 \(targetPort) 已被其他程序占用，且它不是 DeepSeek Harness。", canInstallDsh: false)
+        }
+      }
+    }
+  }
+
+  /// Reuse an already-running dsh web instance; the app never terminates a
+  /// server it did not spawn.
+  private func attach(port: Int) {
+    let url = URL(string: "http://127.0.0.1:\(port)/")!
+    AppLog.shared.info("server: attaching to existing dsh web at \(url)")
+    serverURL = url
+    delegate?.serverController(self, didUpdateStatus: "已连接到本地服务…")
+    delegate?.serverController(self, didBecomeReady: url)
+  }
+
+  /// Spawn `dsh web` and wait for its readiness line.
+  /// @param port - explicit `--port` value; nil keeps dsh's default (3080),
+  /// 0 asks the OS to pick a free port.
+  private func spawn(port requestedPort: Int?) {
+    guard let dshPath = resolveDshBinary() else {
+      AppLog.shared.error("server: no dsh binary found")
+      delegate?.serverController(self, didFail:
+        "未找到 dsh 命令。需要先安装 DeepSeek Harness CLI（npm i -g @deepseek-ai/dsh）。",
+        canInstallDsh: true)
+      return
+    }
+
+    var args = ["web"]
+    if let requestedPort { args += ["--port", String(requestedPort)] }
+
+    let process = Process()
+    if options.direct {
+      process.executableURL = URL(fileURLWithPath: dshPath)
+      process.arguments = args
+    } else {
+      // Launch through the login shell so the child inherits the user's
+      // shell environment (credentials from ~/.zshrc and friends), matching
+      // what `dsh web` sees when started from a terminal.
+      process.executableURL = URL(fileURLWithPath: "/bin/zsh")
+      let shellQuote: (String) -> String = { "'" + $0.replacingOccurrences(of: "'", with: "'\\''") + "'" }
+      let command = ([dshPath] + args).map(shellQuote).joined(separator: " ")
+      process.arguments = ["-lc", "exec \(command)"]
+    }
+    process.currentDirectoryURL = URL(fileURLWithPath: options.cwd ?? NSHomeDirectory())
+
+    var environment = ProcessInfo.processInfo.environment
+    let inheritedPath = environment["PATH"] ?? "/usr/bin:/bin:/usr/sbin:/sbin"
+    environment["PATH"] = "/opt/homebrew/bin:/usr/local/bin:" + inheritedPath
+    process.environment = environment
+
+    let stdoutPipe = Pipe()
+    let stderrPipe = Pipe()
+    process.standardOutput = stdoutPipe
+    process.standardError = stderrPipe
+
+    stdoutPipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
+      let data = handle.availableData
+      guard !data.isEmpty else { return }
+      self?.ioQueue.async { self?.consume(data, errorStream: false) }
+    }
+    stderrPipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
+      let data = handle.availableData
+      guard !data.isEmpty else { return }
+      self?.ioQueue.async { self?.consume(data, errorStream: true) }
+    }
+    process.terminationHandler = { [weak self] finished in
+      DispatchQueue.main.async { self?.handleExit(code: finished.terminationStatus) }
+    }
+
+    do {
+      try process.run()
+    } catch {
+      AppLog.shared.error("server: failed to run dsh: \(error.localizedDescription)")
+      delegate?.serverController(self, didFail: "无法启动 dsh：\(error.localizedDescription)",
+        canInstallDsh: false)
+      return
+    }
+    spawnedProcess = process
+    logTail.removeAll()
+    AppLog.shared.info("server: spawned dsh web (pid \(process.processIdentifier)) args=\(args) cwd=\(process.currentDirectoryURL?.path ?? "")")
+    delegate?.serverController(self, didUpdateStatus: "正在启动 DeepSeek Harness…")
+    scheduleReadyTimeout()
+  }
+
+  // MARK: - Output parsing
+
+  private func consume(_ chunk: Data, errorStream: Bool) {
+    var buffer = errorStream ? stderrBuffer : stdoutBuffer
+    buffer.append(chunk)
+    while let newline = buffer.firstIndex(of: 0x0A) {
+      let lineData = buffer[buffer.startIndex..<newline]
+      buffer.removeSubrange(buffer.startIndex...newline)
+      processLine(String(data: lineData, encoding: .utf8) ?? "")
+    }
+    if errorStream { stderrBuffer = buffer } else { stdoutBuffer = buffer }
+  }
+
+  private func processLine(_ rawLine: String) {
+    let line = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !line.isEmpty else { return }
+    AppLog.shared.info("dsh: \(line)")
+    logTail.append(line)
+    if logTail.count > 200 { logTail.removeFirst(logTail.count - 200) }
+    guard serverURL == nil else { return }
+    let range = NSRange(line.startIndex..., in: line)
+    guard let match = Self.readyPattern.firstMatch(in: line, range: range),
+      let portRange = Range(match.range(at: 1), in: line),
+      let port = Int(line[portRange]) else { return }
+    DispatchQueue.main.async { [weak self] in self?.becomeReady(port: port) }
+  }
+
+  private func becomeReady(port: Int) {
+    guard serverURL == nil else { return }
+    let url = URL(string: "http://127.0.0.1:\(port)/")!
+    AppLog.shared.info("server: ready at \(url)")
+    serverURL = url
+    readyTimeoutWork?.cancel()
+    delegate?.serverController(self, didBecomeReady: url)
+  }
+
+  private func scheduleReadyTimeout() {
+    let work = DispatchWorkItem { [weak self] in
+      guard let self, self.serverURL == nil, !self.stopping else { return }
+      AppLog.shared.error("server: readiness timeout (60s)")
+      self.spawnedProcess?.terminate()
+      self.delegate?.serverController(self, didFail:
+        "服务启动超时。\n\n最近日志：\n\(self.logTailText())", canInstallDsh: false)
+    }
+    readyTimeoutWork = work
+    DispatchQueue.main.asyncAfter(deadline: .now() + 60, execute: work)
+  }
+
+  // MARK: - Crash handling
+
+  private func handleExit(code: Int32) {
+    readyTimeoutWork?.cancel()
+    spawnedProcess = nil
+    if stopping {
+      AppLog.shared.info("server: dsh web exited (code \(code)) during shutdown")
+      return
+    }
+    AppLog.shared.error("server: dsh web exited unexpectedly (code \(code))")
+    if serverURL == nil {
+      delegate?.serverController(self, didFail:
+        "服务启动失败（退出码 \(code)）。\n\n最近日志：\n\(logTailText())", canInstallDsh: false)
+      return
+    }
+    serverURL = nil
+    let now = Date()
+    if now.timeIntervalSince(restartWindowStart) > 60 {
+      restartWindowStart = now
+      restartAttempts = 0
+    }
+    restartAttempts += 1
+    if restartAttempts <= 3 {
+      AppLog.shared.info("server: scheduling restart (attempt \(restartAttempts))")
+      delegate?.serverController(self, didUpdateStatus: "服务意外退出，正在重启…")
+      DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
+        guard let self, !self.stopping else { return }
+        self.start()
+      }
+    } else {
+      delegate?.serverController(self, didFail:
+        "服务反复退出，已停止自动重启。\n\n最近日志：\n\(self.logTailText())", canInstallDsh: false)
+    }
+  }
+
+  // MARK: - Shutdown
+
+  /// Terminate the spawned server (no-op when attached) and wait for exit.
+  /// dsh's graceful shutdown budget is 5s; SIGKILL follows at 7s.
+  func stop() {
+    stopping = true
+    readyTimeoutWork?.cancel()
+    guard let process = spawnedProcess, process.isRunning else {
+      AppLog.shared.info("server: stop; no spawned process to terminate")
+      return
+    }
+    AppLog.shared.info("server: stopping spawned dsh web (pid \(process.processIdentifier))")
+    process.terminate()
+    let semaphore = DispatchSemaphore(value: 0)
+    DispatchQueue.global().async {
+      process.waitUntilExit()
+      semaphore.signal()
+    }
+    if semaphore.wait(timeout: .now() + 7) == .timedOut {
+      AppLog.shared.error("server: dsh web did not exit within 7s; sending SIGKILL")
+      kill(process.processIdentifier, SIGKILL)
+    } else {
+      AppLog.shared.info("server: dsh web exited cleanly (code \(process.terminationStatus))")
+    }
+  }
+
+  // MARK: - Helpers
+
+  /// The tail of captured dsh output, for error dialogs.
+  func logTailText() -> String {
+    logTail.suffix(60).joined(separator: "\n")
+  }
+
+  /// Probe the loopback port and classify what answers.
+  /// @param port - target port.
+  /// @param completion - always called on the main queue: every consumer
+  /// path reaches AppKit/WKWebView delegate calls.
+  private func probe(port: Int, completion: @escaping (ProbeResult) -> Void) {
+    guard let url = URL(string: "http://127.0.0.1:\(port)/") else {
+      completion(.free)
+      return
+    }
+    var request = URLRequest(url: url)
+    request.timeoutInterval = 2
+    let session = URLSession(configuration: .ephemeral)
+    session.dataTask(with: request) { data, response, error in
+      let result: ProbeResult
+      if error != nil {
+        AppLog.shared.info("server: probe \(port): free (\(error?.localizedDescription ?? ""))")
+        result = .free
+      } else if let http = response as? HTTPURLResponse, let data,
+        http.statusCode < 500,
+        (String(data: data, encoding: .utf8) ?? "").contains("DeepSeek Harness") {
+        AppLog.shared.info("server: probe \(port): dsh web present")
+        result = .dshReady(port: port)
+      } else {
+        AppLog.shared.info("server: probe \(port): other service")
+        result = .otherService
+      }
+      // URLSession completion handlers run on a background queue; delegate
+      // calls touch WKWebView/AppKit, which requires the main thread.
+      DispatchQueue.main.async { completion(result) }
+    }.resume()
+  }
+
+  /// Locate a runnable `dsh` binary: explicit path, then PATH and known
+  /// prefixes, then npm npx checkouts (newest @deepseek-ai/dsh first).
+  func resolveDshBinary() -> String? {
+    let fm = FileManager.default
+    if let overridePath = options.dshPath, fm.isExecutableFile(atPath: overridePath) {
+      return overridePath
+    }
+    var candidates: [(path: String, rank: Int)] = []
+    var searchDirs = ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"]
+    searchDirs += (ProcessInfo.processInfo.environment["PATH"] ?? "")
+      .split(separator: ":").map(String.init)
+    for dir in searchDirs {
+      let path = (dir as NSString).appendingPathComponent("dsh")
+      if fm.isExecutableFile(atPath: path) { candidates.append((path, 1_000_000)) }
+    }
+    let npxRoot = (NSHomeDirectory() as NSString).appendingPathComponent(".npm/_npx")
+    if let checkouts = try? fm.contentsOfDirectory(atPath: npxRoot) {
+      for checkout in checkouts {
+        let bin = (npxRoot as NSString)
+          .appendingPathComponent("\(checkout)/node_modules/.bin/dsh")
+        guard fm.isExecutableFile(atPath: bin) else { continue }
+        var rank = 10
+        let manifestPath = (npxRoot as NSString).appendingPathComponent("\(checkout)/package.json")
+        if let data = try? Data(contentsOf: URL(fileURLWithPath: manifestPath)),
+          let manifest = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+          let dependencies = manifest["dependencies"] as? [String: String],
+          let version = dependencies["@deepseek-ai/dsh"] {
+          rank = version.split(separator: ".").enumerated().reduce(0) { acc, pair in
+            acc * 1000 + (Int(pair.element.prefix(while: \.isNumber)) ?? 0)
+          }
+        }
+        candidates.append((bin, rank))
+      }
+    }
+    guard let best = candidates.max(by: { $0.rank < $1.rank }) else { return nil }
+    AppLog.shared.info("server: dsh binary resolved: \(best.path)")
+    return best.path
+  }
+}
