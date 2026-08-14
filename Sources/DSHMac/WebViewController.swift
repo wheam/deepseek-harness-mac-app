@@ -4,10 +4,15 @@ import WebKit
 /// The top strip that replaces the transparent-titlebar background: it is
 /// painted two-tone (sidebar color over the sidebar width, content color
 /// over the rest) so the window top continues the page's column colors
-/// seamlessly. Hit-testing collapses to itself so drags anywhere on the
-/// strip move the window.
+/// seamlessly. Hits collapse to the strip itself only when the point is
+/// actually inside it, so drags on the strip move the window while every
+/// other click falls through to the page.
 final class TitleStripView: NSView {
-  override func hitTest(_ point: NSPoint) -> NSView? { self }
+  override func hitTest(_ point: NSPoint) -> NSView? {
+    // Respect hidden state and bounds; only then claim the hit for dragging.
+    guard super.hitTest(point) != nil else { return nil }
+    return self
+  }
   override var mouseDownCanMoveWindow: Bool { true }
 }
 
@@ -51,65 +56,71 @@ final class WebViewController: NSViewController, WKNavigationDelegate, WKUIDeleg
   private var targetURL: URL?
   private var hasLoadedOnce = false
   private var sidebarWidth: CGFloat = 0
+  private var appliedState: (String, String, String, Bool, Double)?
   private let themeProxy: ThemeMessageProxy
 
   private static let loopbackHosts: Set<String> = ["127.0.0.1", "localhost", "[::1]", "harness.internal"]
   private static let themeMessageName = "dshTheme"
 
   /// Page-side reporter: samples the sidebar/content/border tokens, the dark
-  /// theme attribute, and the live sidebar width, then posts them whenever
-  /// the layout or theme changes. Debounced because the chat mutates the DOM
-  /// constantly; the sidebar width is measured by hit-testing the top-left
+  /// theme attribute, and the live sidebar width, and posts them only when
+  /// something actually changed (dedupe keeps native traffic at zero during
+  /// normal use). The sidebar width is measured by hit-testing the top-left
   /// column and climbing to its outermost sidebar-colored ancestor, which
-  /// survives CSS-module class renames across dsh builds.
+  /// survives CSS-module class renames across dsh builds. One computed-style
+  /// snapshot serves all three token reads.
   private static let themeScript = WKUserScript(
     source: """
     (function () {
       const h = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.dshTheme;
       if (!h) return;
-      const token = function (name) {
-        try { return getComputedStyle(document.body).getPropertyValue(name).trim(); } catch (e) { return ''; }
-      };
-      const sidebarWidth = function () {
+      let lastPayload = '';
+      const build = function () {
+        const body = document.body;
+        if (!body) return null;
         try {
-          const fill = token('--dsw-specific-sidebar-fill');
-          if (!fill) return 0;
-          let el = document.elementFromPoint(10, 40);
-          let best = null;
-          while (el && el !== document.body) {
-            let bg = '';
-            try { bg = getComputedStyle(el).backgroundColor; } catch (e) {}
-            if (bg === fill) best = el;
-            el = el.parentElement;
+          const style = getComputedStyle(body);
+          const sidebar = style.getPropertyValue('--dsw-specific-sidebar-fill').trim();
+          const content = style.getPropertyValue('--dsw-alias-bg-base').trim();
+          const border = style.getPropertyValue('--dsw-alias-border-l1').trim();
+          const dark = body.hasAttribute('data-ds-dark-theme');
+          let width = 0;
+          if (sidebar) {
+            let el = document.elementFromPoint(10, 40);
+            let best = null;
+            while (el && el !== body) {
+              let bg = '';
+              try { bg = getComputedStyle(el).backgroundColor; } catch (e) {}
+              if (bg === sidebar) best = el;
+              el = el.parentElement;
+            }
+            if (best) width = best.getBoundingClientRect().width;
           }
-          return best ? best.getBoundingClientRect().width : 0;
-        } catch (e) { return 0; }
+          return JSON.stringify({ sidebar, content, border, dark, width });
+        } catch (e) { return null; }
       };
-      const payload = function () {
-        return JSON.stringify({
-          sidebar: token('--dsw-specific-sidebar-fill'),
-          content: token('--dsw-alias-bg-base'),
-          border: token('--dsw-alias-border-l1'),
-          dark: document.body && document.body.hasAttribute('data-ds-dark-theme'),
-          width: sidebarWidth(),
-        });
+      const post = function () {
+        const p = build();
+        if (!p || p === lastPayload) return;
+        lastPayload = p;
+        try { h.postMessage(p); } catch (e) {}
       };
-      const safe = function () { try { h.postMessage(payload()); } catch (e) {} };
-      window.__dshThemeReport = payload;
+      window.__dshThemeReport = build;
       let timer = null;
-      const debounced = function () {
+      const schedule = function () {
         if (timer) return;
-        timer = setTimeout(function () { timer = null; safe(); }, 150);
+        timer = setTimeout(function () { timer = null; post(); }, 300);
       };
-      if (document.body) safe(); else document.addEventListener('DOMContentLoaded', safe);
-      setTimeout(safe, 300);
-      setTimeout(safe, 1200);
-      window.addEventListener('resize', debounced);
-      const mo = new MutationObserver(debounced);
+      const mo = new MutationObserver(schedule);
       const observe = function () {
-        if (document.body) mo.observe(document.body, { attributes: true, childList: true, subtree: true });
+        if (document.body) mo.observe(document.body, { attributes: true, subtree: true });
       };
-      if (document.body) observe(); else document.addEventListener('DOMContentLoaded', observe);
+      if (document.body) { observe(); post(); }
+      else document.addEventListener('DOMContentLoaded', function () { observe(); post(); });
+      setTimeout(post, 500);
+      setTimeout(post, 1500);
+      window.addEventListener('resize', schedule);
+      setInterval(post, 3000);
     })();
     """,
     injectionTime: .atDocumentEnd,
@@ -288,6 +299,7 @@ final class WebViewController: NSViewController, WKNavigationDelegate, WKUIDeleg
       sidebarWidth > 0 else {
       // Page tokens missing or renamed in this dsh build: fall back to the
       // uniform system window look instead of guessing colors.
+      appliedState = nil
       leftStrip.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
       rightStrip.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
       stripBorder.isHidden = true
@@ -298,6 +310,12 @@ final class WebViewController: NSViewController, WKNavigationDelegate, WKUIDeleg
       view.needsLayout = true
       return
     }
+    // Dedupe: the reporter already suppresses unchanged payloads; this guard
+    // keeps any residual repeats from re-touching the window.
+    let state = (sidebarColorString, contentColorString, borderColorString, dark, sidebarWidth)
+    if let appliedState, appliedState == state { return }
+    appliedState = state
+    let widthChanged = self.sidebarWidth != sidebarWidth
     self.sidebarWidth = sidebarWidth
     leftStrip.layer?.backgroundColor = sidebarColor.cgColor
     rightStrip.layer?.backgroundColor = contentColor.cgColor
@@ -306,7 +324,7 @@ final class WebViewController: NSViewController, WKNavigationDelegate, WKUIDeleg
     window.backgroundColor = contentColor
     window.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
     AppLog.shared.info("webview: theme synced (dark=\(dark), sidebar=\(sidebarColorString), content=\(contentColorString), width=\(sidebarWidth))")
-    view.needsLayout = true
+    if widthChanged { view.needsLayout = true }
   }
 
   /// Parse a CSS color string: `rgb(r, g, b)`, `rgb(r g b)`, or `rgba(...)`.

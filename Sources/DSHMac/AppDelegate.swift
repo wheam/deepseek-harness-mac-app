@@ -111,8 +111,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ServerControllerDelega
     // Full-size content view + transparent titlebar: the webview's own
     // two-tone strip paints the titlebar band, so the page's column colors
     // continue to the top edge with no separator line. The titlebar height
-    // is measured before the style change and handed to the strip layout.
-    let titlebarHeight = window.frame.height - window.contentLayoutRect.height
+    // is measured before the style change, clamped to a sane band, and
+    // handed to the strip layout.
+    let measuredTitlebarHeight = window.frame.height - window.contentLayoutRect.height
+    let titlebarHeight = min(max(measuredTitlebarHeight, 20), 40)
+    AppLog.shared.info("app: titlebar height \(measuredTitlebarHeight) -> clamped \(titlebarHeight)")
     window.styleMask.insert(.fullSizeContentView)
     window.titlebarAppearsTransparent = true
     window.titlebarSeparatorStyle = .none
