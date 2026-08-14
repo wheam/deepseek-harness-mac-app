@@ -23,7 +23,7 @@ jobs:
           cd dist
           ditto -c -k --sequesterRsrc --keepParent "DeepSeek Harness.app" DeepSeek-Harness.zip
           cd ..
-          mv "dist/DeepSeek Harness.zip" .
+          mv "dist/DeepSeek-Harness.zip" .
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
