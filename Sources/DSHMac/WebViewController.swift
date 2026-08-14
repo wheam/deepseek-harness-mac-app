@@ -1,6 +1,16 @@
 import AppKit
 import WebKit
 
+/// The top strip that replaces the transparent-titlebar background: it is
+/// painted two-tone (sidebar color over the sidebar width, content color
+/// over the rest) so the window top continues the page's column colors
+/// seamlessly. Hit-testing collapses to itself so drags anywhere on the
+/// strip move the window.
+final class TitleStripView: NSView {
+  override func hitTest(_ point: NSPoint) -> NSView? { self }
+  override var mouseDownCanMoveWindow: Bool { true }
+}
+
 /// Weak-indirection script-message handler: `WKUserContentController` retains
 /// its handlers, so forwarding through a proxy avoids a retain cycle with the
 /// owning view controller.
@@ -12,10 +22,10 @@ final class ThemeMessageProxy: NSObject, WKScriptMessageHandler {
   }
 }
 
-/// The native window content: a WKWebView filling the window, with a minimal
-/// native loading overlay. The page inside is the stock dsh web UI — this
-/// class never alters it. It does sample the page's design tokens to keep the
-/// transparent titlebar strip the same color as the page's sidebar.
+/// The native window content: a WKWebView below a two-tone titlebar strip,
+/// plus a minimal loading overlay. The page inside is the stock dsh web UI —
+/// this class never alters it. It samples the page's design tokens to keep
+/// the strip an exact continuation of the page's column layout.
 final class WebViewController: NSViewController, WKNavigationDelegate, WKUIDelegate {
   let webView: WKWebView
 
@@ -24,41 +34,82 @@ final class WebViewController: NSViewController, WKNavigationDelegate, WKUIDeleg
   /// Called for links that should leave the shell (open in default browser).
   var onOpenExternal: ((URL) -> Void)?
 
+  /// Height of the window's titlebar area, set by the app delegate after the
+  /// window is measured; the strip fills this band.
+  var titlebarHeight: CGFloat = 28 {
+    didSet { view.needsLayout = true }
+  }
+
+  private let stripView = TitleStripView()
+  private let leftStrip = NSView()
+  private let rightStrip = NSView()
+  private let stripBorder = NSView()
   private let overlay = NSView()
   private let spinner = NSProgressIndicator()
   private let statusLabel = NSTextField(labelWithString: "")
   private let retryButton = NSButton(title: "重试", target: nil, action: nil)
   private var targetURL: URL?
   private var hasLoadedOnce = false
+  private var sidebarWidth: CGFloat = 0
   private let themeProxy: ThemeMessageProxy
 
   private static let loopbackHosts: Set<String> = ["127.0.0.1", "localhost", "[::1]", "harness.internal"]
   private static let themeMessageName = "dshTheme"
 
-  /// Page-side reporter: samples the sidebar fill token and the dark-theme
-  /// attribute, and posts both whenever the body attributes change.
+  /// Page-side reporter: samples the sidebar/content/border tokens, the dark
+  /// theme attribute, and the live sidebar width, then posts them whenever
+  /// the layout or theme changes. Debounced because the chat mutates the DOM
+  /// constantly; the sidebar width is measured by hit-testing the top-left
+  /// column and climbing to its outermost sidebar-colored ancestor, which
+  /// survives CSS-module class renames across dsh builds.
   private static let themeScript = WKUserScript(
     source: """
     (function () {
       const h = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.dshTheme;
       if (!h) return;
-      const report = function () {
-        const body = document.body;
-        if (!body) return;
-        let color = '';
-        try { color = getComputedStyle(body).getPropertyValue('--dsw-specific-sidebar-fill').trim(); } catch (e) {}
-        const dark = body.hasAttribute('data-ds-dark-theme');
-        h.postMessage(JSON.stringify({ color: color, dark: dark }));
+      const token = function (name) {
+        try { return getComputedStyle(document.body).getPropertyValue(name).trim(); } catch (e) { return ''; }
       };
-      const safe = function () { try { report(); } catch (e) {} };
-      if (document.body) { safe(); } else { document.addEventListener('DOMContentLoaded', safe); }
+      const sidebarWidth = function () {
+        try {
+          const fill = token('--dsw-specific-sidebar-fill');
+          if (!fill) return 0;
+          let el = document.elementFromPoint(10, 40);
+          let best = null;
+          while (el && el !== document.body) {
+            let bg = '';
+            try { bg = getComputedStyle(el).backgroundColor; } catch (e) {}
+            if (bg === fill) best = el;
+            el = el.parentElement;
+          }
+          return best ? best.getBoundingClientRect().width : 0;
+        } catch (e) { return 0; }
+      };
+      const payload = function () {
+        return JSON.stringify({
+          sidebar: token('--dsw-specific-sidebar-fill'),
+          content: token('--dsw-alias-bg-base'),
+          border: token('--dsw-alias-border-l1'),
+          dark: document.body && document.body.hasAttribute('data-ds-dark-theme'),
+          width: sidebarWidth(),
+        });
+      };
+      const safe = function () { try { h.postMessage(payload()); } catch (e) {} };
+      window.__dshThemeReport = payload;
+      let timer = null;
+      const debounced = function () {
+        if (timer) return;
+        timer = setTimeout(function () { timer = null; safe(); }, 150);
+      };
+      if (document.body) safe(); else document.addEventListener('DOMContentLoaded', safe);
       setTimeout(safe, 300);
       setTimeout(safe, 1200);
+      window.addEventListener('resize', debounced);
+      const mo = new MutationObserver(debounced);
       const observe = function () {
-        if (!document.body) return;
-        new MutationObserver(safe).observe(document.body, { attributes: true });
+        if (document.body) mo.observe(document.body, { attributes: true, childList: true, subtree: true });
       };
-      if (document.body) { observe(); } else { document.addEventListener('DOMContentLoaded', observe); }
+      if (document.body) observe(); else document.addEventListener('DOMContentLoaded', observe);
     })();
     """,
     injectionTime: .atDocumentEnd,
@@ -88,12 +139,10 @@ final class WebViewController: NSViewController, WKNavigationDelegate, WKUIDeleg
 
   override func loadView() {
     let root = NSView(frame: NSRect(x: 0, y: 0, width: 1200, height: 800))
-    webView.frame = root.bounds
-    webView.autoresizingMask = [.width, .height]
+    webView.autoresizingMask = []
     root.addSubview(webView)
 
-    overlay.frame = root.bounds
-    overlay.autoresizingMask = [.width, .height]
+    overlay.autoresizingMask = []
     overlay.wantsLayer = true
     overlay.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
 
@@ -122,7 +171,32 @@ final class WebViewController: NSViewController, WKNavigationDelegate, WKUIDeleg
       statusLabel.widthAnchor.constraint(lessThanOrEqualToConstant: 480),
     ])
     root.addSubview(overlay)
+
+    // The strip sits above the webview in the titlebar band; its subviews
+    // are plain colored layers repositioned by viewDidLayout.
+    for piece in [leftStrip, rightStrip, stripBorder] {
+      piece.wantsLayer = true
+      piece.autoresizingMask = []
+    }
+    stripBorder.isHidden = true
+    stripView.addSubview(leftStrip)
+    stripView.addSubview(rightStrip)
+    stripView.addSubview(stripBorder)
+    stripView.wantsLayer = true
+    root.addSubview(stripView)
     view = root
+  }
+
+  override func viewDidLayout() {
+    super.viewDidLayout()
+    let bounds = view.bounds
+    let stripHeight = min(titlebarHeight, bounds.height)
+    stripView.frame = NSRect(x: 0, y: bounds.height - stripHeight, width: bounds.width, height: stripHeight)
+    leftStrip.frame = NSRect(x: 0, y: 0, width: max(0, sidebarWidth - 1), height: stripHeight)
+    stripBorder.frame = NSRect(x: max(0, sidebarWidth - 1), y: 0, width: 1, height: stripHeight)
+    rightStrip.frame = NSRect(x: sidebarWidth, y: 0, width: max(0, bounds.width - sidebarWidth), height: stripHeight)
+    webView.frame = NSRect(x: 0, y: 0, width: bounds.width, height: bounds.height - stripHeight)
+    overlay.frame = webView.frame
   }
 
   /// Show the loading overlay with a status line.
@@ -167,7 +241,7 @@ final class WebViewController: NSViewController, WKNavigationDelegate, WKUIDeleg
     }
   }
 
-  // MARK: - Titlebar theme sync
+  // MARK: - Titlebar strip theme sync
 
   /// Entry point for the page-side reporter (called on the main thread).
   func handleThemeMessage(_ message: WKScriptMessage) {
@@ -178,16 +252,7 @@ final class WebViewController: NSViewController, WKNavigationDelegate, WKUIDeleg
   /// Re-sample the page tokens after a finished navigation (belt and
   /// suspenders on top of the injected reporter).
   private func samplePageTheme() {
-    let js = """
-    (() => {
-      const body = document.body;
-      if (!body) return null;
-      let color = '';
-      try { color = getComputedStyle(body).getPropertyValue('--dsw-specific-sidebar-fill').trim(); } catch (e) {}
-      return JSON.stringify({ color: color, dark: body.hasAttribute('data-ds-dark-theme') });
-    })()
-    """
-    webView.evaluateJavaScript(js) { [weak self] result, _ in
+    webView.evaluateJavaScript("window.__dshThemeReport ? window.__dshThemeReport() : null") { [weak self] result, _ in
       guard let payload = result as? String else { return }
       self?.handleThemePayload(payload)
     }
@@ -200,30 +265,48 @@ final class WebViewController: NSViewController, WKNavigationDelegate, WKUIDeleg
       AppLog.shared.info("webview: unparsable theme payload")
       return
     }
-    let colorString = json["color"] as? String ?? ""
+    let sidebar = json["sidebar"] as? String ?? ""
+    let content = json["content"] as? String ?? ""
+    let border = json["border"] as? String ?? ""
     let dark = json["dark"] as? Bool ?? false
-    applyPageTheme(colorString: colorString, dark: dark)
+    let width = json["width"] as? Double ?? 0
+    applyPageTheme(sidebarColorString: sidebar, contentColorString: content,
+      borderColorString: border, sidebarWidth: width, dark: dark)
   }
 
-  /// Paint the transparent-titlebar strip with the page's sidebar color and
-  /// match the window appearance to the page theme, so the title text and
+  /// Paint the strip two-tone: sidebar color over the sidebar width, content
+  /// color over the rest, with the page's own 1px column border between them.
+  /// The window appearance follows the page theme so the title text and
   /// traffic lights keep contrast in both light and dark pages.
-  private func applyPageTheme(colorString: String, dark: Bool) {
+  private func applyPageTheme(sidebarColorString: String, contentColorString: String, borderColorString: String, sidebarWidth: Double, dark: Bool) {
     guard let window = view.window else {
       AppLog.shared.info("webview: theme payload before window attach; skipped")
       return
     }
-    if let color = Self.parseRgbColor(colorString) {
-      window.backgroundColor = color
-      window.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
-      AppLog.shared.info("webview: theme synced (dark=\(dark), color=\(colorString))")
-    } else {
-      // The sidebar token is missing or renamed in this dsh build: fall back
-      // to the system window look instead of guessing a color.
+    guard let sidebarColor = Self.parseRgbColor(sidebarColorString),
+      let contentColor = Self.parseRgbColor(contentColorString),
+      sidebarWidth > 0 else {
+      // Page tokens missing or renamed in this dsh build: fall back to the
+      // uniform system window look instead of guessing colors.
+      leftStrip.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
+      rightStrip.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
+      stripBorder.isHidden = true
+      self.sidebarWidth = 0
       window.backgroundColor = .windowBackgroundColor
       window.appearance = nil
-      AppLog.shared.info("webview: sidebar token unavailable; using system window background")
+      AppLog.shared.info("webview: page tokens unavailable; using system window strip")
+      view.needsLayout = true
+      return
     }
+    self.sidebarWidth = sidebarWidth
+    leftStrip.layer?.backgroundColor = sidebarColor.cgColor
+    rightStrip.layer?.backgroundColor = contentColor.cgColor
+    stripBorder.layer?.backgroundColor = (Self.parseRgbColor(borderColorString) ?? NSColor.separatorColor).cgColor
+    stripBorder.isHidden = false
+    window.backgroundColor = contentColor
+    window.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
+    AppLog.shared.info("webview: theme synced (dark=\(dark), sidebar=\(sidebarColorString), content=\(contentColorString), width=\(sidebarWidth))")
+    view.needsLayout = true
   }
 
   /// Parse a CSS color string: `rgb(r, g, b)`, `rgb(r g b)`, or `rgba(...)`.

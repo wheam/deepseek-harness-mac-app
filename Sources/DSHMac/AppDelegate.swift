@@ -108,12 +108,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ServerControllerDelega
       backing: .buffered,
       defer: false)
     window.title = "DeepSeek Harness"
-    // Transparent titlebar: no separator line between titlebar and content,
-    // matching the modern borderless macOS look while keeping the native
-    // title text and traffic lights.
+    // Full-size content view + transparent titlebar: the webview's own
+    // two-tone strip paints the titlebar band, so the page's column colors
+    // continue to the top edge with no separator line. The titlebar height
+    // is measured before the style change and handed to the strip layout.
+    let titlebarHeight = window.frame.height - window.contentLayoutRect.height
+    window.styleMask.insert(.fullSizeContentView)
     window.titlebarAppearsTransparent = true
+    window.titlebarSeparatorStyle = .none
     window.titleVisibility = .visible
     window.contentViewController = controller
+    controller.titlebarHeight = titlebarHeight
     window.minSize = NSSize(width: 960, height: 640)
     window.isReleasedWhenClosed = false
     window.tabbingMode = .disallowed
