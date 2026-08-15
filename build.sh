@@ -49,8 +49,23 @@ else
   echo "==> warning: swift/iconutil missing, skipping icon"
 fi
 
-echo "==> ad-hoc codesign"
-codesign --force --deep --sign - "$OUT" >/dev/null 2>&1 || echo "warning: codesign skipped"
+echo "==> codesign"
+# Prefer the stable self-signed identity (set up once via
+# scripts/setup-signing.sh): a fixed signing authority lets macOS remember
+# privacy (TCC) choices across rebuilds and updates. Falls back to ad-hoc.
+SIGNING_KEYCHAIN="${CODESIGN_KEYCHAIN:-$HOME/Library/Keychains/dsh-signing.keychain-db}"
+SIGNING_IDENTITY="${CODESIGN_IDENTITY:-DeepSeek Harness Dev}"
+if [ -f "$SIGNING_KEYCHAIN" ]; then
+  security unlock-keychain -p "${CODESIGN_KEYCHAIN_PASSWORD:-dshdev}" "$SIGNING_KEYCHAIN" >/dev/null 2>&1 || true
+  if codesign --force --deep --sign "$SIGNING_IDENTITY" --keychain "$SIGNING_KEYCHAIN" "$OUT" >/dev/null 2>&1; then
+    codesign -dv "$OUT" 2>&1 | grep -E "Authority|Signature" || true
+  else
+    echo "warning: identity signing failed, falling back to ad-hoc"
+    codesign --force --deep --sign - "$OUT" >/dev/null 2>&1 || true
+  fi
+else
+  codesign --force --deep --sign - "$OUT" >/dev/null 2>&1 || echo "warning: codesign skipped"
+fi
 
 echo "==> done: $OUT"
 echo "    run it with:  open \"$OUT\""

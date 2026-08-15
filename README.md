@@ -116,7 +116,9 @@ build.sh                          构建并组装 .app（ad-hoc 签名）
 
 ### 说明
 
-- App 未开沙箱（无 entitlements），否则无法管理子进程；本地产物 ad-hoc 签名，可直接运行，不触发 Gatekeeper 隔离。
+- App 未开沙箱（无 entitlements），否则无法管理子进程；产物为自签名（默认 ad-hoc，也可用固定身份签名），可直接运行，不触发 Gatekeeper 隔离。
+- 固定签名身份（推荐本地配置一次）：`./scripts/setup-signing.sh` 导入自签名证书后，所有构建用同一身份签名，
+  macOS 会把每次构建/自动更新认作同一个 App，隐私授权（如"下载文件夹"弹窗）点一次"允许"即永久记住。
 - 开机自启：在「系统设置 → 通用 → 登录项」里手动添加本 App。
 - 若构建产物曾被 `open` 启动，会被 macOS 启动器登记，可能出现两个同名图标；日常只从 `~/Applications` 打开即可。
 
@@ -221,7 +223,8 @@ build.sh                          builds and assembles the .app (ad-hoc signed)
 
 ### Notes
 
-- The app is not sandboxed (no entitlements), because it manages child processes; local builds are ad-hoc signed and run without Gatekeeper prompts.
+- The app is not sandboxed (no entitlements), because it manages child processes; builds are self-signed (ad-hoc by default, or with a fixed identity) and run without Gatekeeper prompts.
+- Fixed signing identity (recommended one-time local setup): `./scripts/setup-signing.sh` imports a self-signed certificate, after which every build and auto-update carries the same identity — macOS treats them as one app and remembers privacy grants (like the Downloads-folder prompt) permanently after a single "Allow".
 - Launch at login: add the app manually in System Settings → General → Login Items.
 - If a build artifact was ever launched with `open`, macOS registers it with the launcher and you may see two same-named icons; just always open the copy in `~/Applications`.
 

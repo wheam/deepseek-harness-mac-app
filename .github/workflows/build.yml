@@ -15,7 +15,30 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Set up signing identity
+        env:
+          P12_BASE64: ${{ secrets.GH_CODESIGN_P12_BASE64 }}
+          P12_PASSWORD: ${{ secrets.GH_CODESIGN_P12_PASSWORD }}
+        run: |
+          if [ -n "$P12_BASE64" ] && [ -n "$P12_PASSWORD" ]; then
+            echo "$P12_BASE64" | base64 -d > /tmp/dsh-dev.p12
+            security create-keychain -p "$P12_PASSWORD" /tmp/dsh-signing.keychain-db
+            security set-keychain-settings -lut 21600 /tmp/dsh-signing.keychain-db
+            security unlock-keychain -p "$P12_PASSWORD" /tmp/dsh-signing.keychain-db
+            security import /tmp/dsh-dev.p12 -P "$P12_PASSWORD" -k /tmp/dsh-signing.keychain-db -T /usr/bin/codesign
+            security set-key-partition-list -S apple-tool:,apple: -s -k "$P12_PASSWORD" /tmp/dsh-signing.keychain-db
+            security list-keychains -d user -s /tmp/dsh-signing.keychain-db
+            rm -f /tmp/dsh-dev.p12
+            echo "signing identity ready"
+          else
+            echo "no signing secrets; builds fall back to ad-hoc"
+          fi
+
       - name: Build universal app bundle
+        env:
+          CODESIGN_IDENTITY: "DeepSeek Harness Dev"
+          CODESIGN_KEYCHAIN: /tmp/dsh-signing.keychain-db
+          CODESIGN_KEYCHAIN_PASSWORD: ${{ secrets.GH_CODESIGN_P12_PASSWORD }}
         run: UNIVERSAL=1 ./build.sh
 
       - name: Package zip
