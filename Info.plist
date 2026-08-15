@@ -32,5 +32,7 @@
 	<true/>
 	<key>CFBundleIconFile</key>
 	<string>AppIcon</string>
+	<key>DSHBuildDate</key>
+	<string></string>
 </dict>
 </plist>

@@ -34,6 +34,10 @@ rm -rf "$OUT"
 mkdir -p "$OUT/Contents/MacOS" "$OUT/Contents/Resources"
 cp "$BIN_PATH" "$OUT/Contents/MacOS/$BIN_NAME"
 cp Info.plist "$OUT/Contents/Info.plist"
+# Stamp the build time (ISO 8601 UTC): the self-updater compares it with
+# the rolling GitHub release's publish time.
+/usr/libexec/PlistBuddy -c "Delete :DSHBuildDate" "$OUT/Contents/Info.plist" 2>/dev/null || true
+/usr/libexec/PlistBuddy -c "Add :DSHBuildDate string $(date -u +%Y-%m-%dT%H:%M:%SZ)" "$OUT/Contents/Info.plist"
 
 if command -v swift >/dev/null 2>&1 && command -v iconutil >/dev/null 2>&1; then
   ICONSET=".build/AppIcon.iconset"

@@ -21,11 +21,14 @@ struct LaunchOptions: CustomStringConvertible {
   var shotScrub = false
   /// Screenshot aid: force the page (and the shell) into the dark theme.
   var shotDark = false
+  /// Disable the startup auto-update checks (dsh CLI and the shell itself).
+  var noAutoUpdate = false
 
   var description: String {
     "LaunchOptions(port: \(port.map(String.init) ?? "nil"), forceSpawn: \(forceSpawn),"
       + " cwd: \(cwd ?? "nil"), dshPath: \(dshPath ?? "nil"), direct: \(direct),"
-      + " logPath: \(logPath ?? "nil"), shotScrub: \(shotScrub), shotDark: \(shotDark))"
+      + " logPath: \(logPath ?? "nil"), shotScrub: \(shotScrub), shotDark: \(shotDark),"
+      + " noAutoUpdate: \(noAutoUpdate))"
   }
 
   /// Parse the process arguments, skipping the executable path at index 0.
@@ -57,6 +60,8 @@ struct LaunchOptions: CustomStringConvertible {
         options.shotScrub = true
       case "--shot-dark":
         options.shotDark = true
+      case "--no-auto-update":
+        options.noAutoUpdate = true
       case "--help":
         print(Self.helpText)
         exit(0)

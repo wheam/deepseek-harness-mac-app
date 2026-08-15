@@ -10,6 +10,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ServerControllerDelega
   private let options: LaunchOptions
   private let logPath: String
   private let server: ServerController
+  private var updater: AppUpdater?
   private var window: NSWindow?
   private var webVC: WebViewController?
   private var distributedObserver: NSObjectProtocol?
@@ -47,7 +48,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ServerControllerDelega
     buildMenu()
     buildWindow()
     showMainWindow()
-    server.start()
+    // Auto-update the global dsh CLI first (so the spawned server runs the
+    // new version), then start the server; the shell self-update check runs
+    // in the background once everything is up.
+    let updater = AppUpdater(server: server, noAutoUpdate: options.noAutoUpdate)
+    self.updater = updater
+    updater.updateDshCliIfNeeded(
+      onStatus: { [weak self] status in self?.webVC?.showStatus(status) }
+    ) { [weak self] in
+      self?.server.start()
+    }
+    DispatchQueue.main.asyncAfter(deadline: .now() + 6) { [weak self] in
+      self?.updater?.checkShellUpdate()
+    }
   }
 
   func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {

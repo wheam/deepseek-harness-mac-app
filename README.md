@@ -38,6 +38,8 @@
 - 菜单栏：关于 / 退出、编辑（撤销/剪贴板）、重新加载 (⌘R)、在浏览器中打开 (⇧⌘O)、窗口。
 - **图标**：白底黑鲸鱼 DeepSeek logo（路径取自 dsh web 官方 favicon，构建时由脚本生成；
   现成的 `resources/AppIcon.icns` 也在仓库里）。
+- **启动自动更新**：全局安装的 dsh CLI 会自动升级到 npm 最新版（服务拉起前完成）；
+  App 外壳会自动检查 GitHub 的最新构建，发现新版本就自动下载、替换并提示重启（`--no-auto-update` 可关闭）。
 
 日志：`~/Library/Logs/DeepSeekHarness/deepseek-harness.log`。
 
@@ -81,6 +83,7 @@ open -a "DeepSeek Harness"
 | `--log <path>` | 日志文件路径 |
 | `--shot-scrub` | 截图辅助：把页面全部文字替换为占位内容 |
 | `--shot-dark` | 截图辅助：把页面切到深色主题 |
+| `--no-auto-update` | 关闭启动自动更新检查（dsh CLI 与外壳） |
 
 ### 结构
 
@@ -139,6 +142,7 @@ A native macOS app for the [DeepSeek Harness](https://github.com/deepseek-ai/dee
 - **External links** (including `target="_blank"`) open in the default browser instead of replacing the shell page.
 - Menu bar: About / Quit, Edit (undo/clipboard), Reload (⌘R), Open in Browser (⇧⌘O), Window.
 - **Icon**: the black DeepSeek whale on a white tile — the path is the official dsh web favicon path, rendered at build time (`scripts/make-icon.swift`); a ready-made `resources/AppIcon.icns` is committed too.
+- **Auto-update on launch**: a globally installed dsh CLI upgrades to the registry's latest (before the server starts); the shell checks the rolling GitHub build, downloads and swaps in the newer bundle, and offers a restart (`--no-auto-update` disables both).
 
 Logs: `~/Library/Logs/DeepSeekHarness/deepseek-harness.log`.
 
@@ -182,6 +186,7 @@ Passed via `open -a "DeepSeek Harness" --args ...`:
 | `--log <path>` | log file path |
 | `--shot-scrub` | screenshot aid: replace all page text with placeholders |
 | `--shot-dark` | screenshot aid: switch the page to the dark theme |
+| `--no-auto-update` | disable the startup auto-update checks (dsh CLI and the shell) |
 
 ### Layout
 

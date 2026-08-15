@@ -326,7 +326,13 @@ final class ServerController {
       .split(separator: ":").map(String.init)
     for dir in searchDirs {
       let path = (dir as NSString).appendingPathComponent("dsh")
-      if fm.isExecutableFile(atPath: path) { candidates.append((path, 1_000_000)) }
+      if fm.isExecutableFile(atPath: path) {
+        // A PATH/known-prefix hit (a real install) always beats npx caches:
+        // return it immediately, since cache rankings can otherwise outrank
+        // it and resurrect a stale frozen version.
+        AppLog.shared.info("server: dsh binary resolved: \(path)")
+        return path
+      }
     }
     let npxRoot = (NSHomeDirectory() as NSString).appendingPathComponent(".npm/_npx")
     if let checkouts = try? fm.contentsOfDirectory(atPath: npxRoot) {
