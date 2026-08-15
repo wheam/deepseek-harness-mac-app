@@ -144,12 +144,17 @@ final class AppUpdater {
   }
 
   private func applyShellUpdate(_ release: ShellRelease) {
-    let tempRoot = NSTemporaryDirectory() + "dsh-shell-update"
+    // Unique per-run temp root: a previous failed attempt may have left
+    // files behind, and removeItem throws when the path does not exist.
+    let tempRoot = NSTemporaryDirectory() + "dsh-shell-update-\(ProcessInfo.processInfo.processIdentifier)"
     let zipPath = tempRoot + "/update.zip"
     let unzipDir = tempRoot + "/app"
     do {
-      try FileManager.default.removeItem(atPath: tempRoot)
-      try FileManager.default.createDirectory(atPath: tempRoot, withIntermediateDirectories: true)
+      let fm = FileManager.default
+      if fm.fileExists(atPath: tempRoot) {
+        try fm.removeItem(atPath: tempRoot)
+      }
+      try fm.createDirectory(atPath: tempRoot, withIntermediateDirectories: true)
       guard let data = try? Data(contentsOf: release.assetURL) else {
         AppLog.shared.error("updater: shell download failed")
         return
