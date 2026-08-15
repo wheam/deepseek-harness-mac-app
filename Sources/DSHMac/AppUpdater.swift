@@ -296,6 +296,11 @@ final class AppUpdater {
     let process = Process()
     process.executableURL = URL(fileURLWithPath: executable)
     process.arguments = arguments
+    // GUI apps get a minimal PATH from launchd; npm needs node on it.
+    var environment = ProcessInfo.processInfo.environment
+    let inheritedPath = environment["PATH"] ?? "/usr/bin:/bin:/usr/sbin:/sbin"
+    environment["PATH"] = "/opt/homebrew/bin:/usr/local/bin:" + inheritedPath
+    process.environment = environment
     let pipe = Pipe()
     process.standardOutput = pipe
     process.standardError = pipe
