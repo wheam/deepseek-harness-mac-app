@@ -68,6 +68,8 @@ open -a "DeepSeek Harness"
 2. 解压，把 `DeepSeek Harness.app` 拖入 `/Applications`（或 `~/Applications`）；
 3. 首次打开：App 是 ad-hoc 签名，**右键点击 → 打开**即可放行；
    或先运行：`xattr -dr com.apple.quarantine "/Applications/DeepSeek Harness.app"`。
+4. 之后无需手动更新：App 每次启动会自动检查并更新自身与全局安装的 dsh CLI
+   （可用 `--no-auto-update` 关闭）。
 
 ### 调试参数
 
@@ -171,6 +173,8 @@ Skip building entirely and grab the CI-built universal bundle (Apple Silicon + I
 2. Unzip and drag `DeepSeek Harness.app` into `/Applications` (or `~/Applications`);
 3. First launch: the app is ad-hoc signed, so **right-click → Open** to allow it,
    or run: `xattr -dr com.apple.quarantine "/Applications/DeepSeek Harness.app"`.
+4. No manual updates after that: on every launch the app checks for and applies
+   updates to itself and to a globally installed dsh CLI (`--no-auto-update` disables this).
 
 ### Debug flags
 
