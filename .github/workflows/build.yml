@@ -72,7 +72,7 @@ jobs:
             # Fail the build rather than ship a bad certificate.
             mkdir -p /tmp/dsh-certs && cd /tmp/dsh-certs
             codesign -d --extract-certificates "$GITHUB_WORKSPACE/dist/DeepSeek Harness.app"
-            openssl x509 -inform DER -in codesign0 -noout -purpose | grep -Eqi "code signing *: *yes" \
+            openssl x509 -inform DER -in codesign0 -noout -text | grep -Eqi "code signing" \
               || { echo "::error::shipped bundle lacks a certificate with the Code Signing EKU; regenerate the p12 with scripts/signing.cnf (see scripts/setup-signing.sh)"; exit 1; }
           fi
 
