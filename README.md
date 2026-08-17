@@ -59,6 +59,8 @@ cp -R "dist/DeepSeek Harness.app" ~/Applications/
 open -a "DeepSeek Harness"
 ```
 
+本地构建的 App 没有网上下载的隔离（quarantine）属性，`open` 直接就能运行；构建产物的签名方式见下方「说明」。
+
 ### 下载现成 App（无需 Xcode）
 
 不想装构建工具的直接下载 CI 自动构建的成品（universal：Apple Silicon 与 Intel 通用）：
@@ -66,10 +68,21 @@ open -a "DeepSeek Harness"
 1. 打开 [Releases](https://github.com/wheam/deepseek-harness-mac-app/releases) 页，下载最新版的 `DeepSeek-Harness.zip`
    （[latest 滚动构建](https://github.com/wheam/deepseek-harness-mac-app/releases/tag/latest) 总是跟随 main 分支）；
 2. 解压，把 `DeepSeek Harness.app` 拖入 `/Applications`（或 `~/Applications`）；
-3. 首次打开：App 是 ad-hoc 签名，**右键点击 → 打开**即可放行；
-   或先运行：`xattr -dr com.apple.quarantine "/Applications/DeepSeek Harness.app"`。
-4. 之后无需手动更新：App 每次启动会自动检查并更新自身与全局安装的 dsh CLI
-   （可用 `--no-auto-update` 关闭）。
+3. 首次打开：本 App 用自签名证书签名（无 Apple Developer ID），浏览器下载会打上隔离（quarantine）属性，
+   macOS Gatekeeper 因此会弹「无法打开，因为无法验证开发者」。这是 macOS 对所有非 Apple 认证开发者的统一行为，
+   App 本身没有损坏。放行方式任选其一：
+   - **右键点击 App → 打开**（最省事；自动更新沿用同一签名身份，通常只需放行一次）；
+   - 或先移除隔离属性再双击：
+     ```sh
+     xattr -dr com.apple.quarantine "/Applications/DeepSeek Harness.app"
+     # 或更彻底地移除全部扩展属性：xattr -cr "/Applications/DeepSeek Harness.app"
+     ```
+4. 之后无需手动更新：App 每次启动会自动检查并更新自身与全局安装的 dsh CLI（自动更新会顺带移除隔离属性；
+   可用 `--no-auto-update` 关闭）。
+
+> 若提示「已损坏，无法打开」：说明签名校验没通过（如下载/解压过程中文件被改动、签名证书过期或不合规）。
+> 先运行 `xattr -cr "/Applications/DeepSeek Harness.app"` 即可照常运行；若仍报错，请重新下载。
+> 彻底消除警告的唯一办法是 Apple Developer ID 签名 + 公证（需付费 Apple 开发者账号，$99/年），本项目暂不提供。
 
 ### 调试参数
 
@@ -102,7 +115,9 @@ Info.plist
 resources/AppIcon.icns            现成的应用图标（构建时会重新生成）
 resources/app-icon-preview.png    图标预览
 scripts/make-icon.swift           图标生成（白底黑鲸鱼）
-build.sh                          构建并组装 .app（ad-hoc 签名）
+scripts/setup-signing.sh          安装固定自签名身份（含 Code Signing EKU 校验）
+scripts/signing.cnf               自签名证书 OpenSSL 配置（Code Signing EKU）
+build.sh                          构建并组装 .app（固定自签名身份，回退 ad-hoc）
 ```
 
 ### 设计决策（为什么这样做）
@@ -116,9 +131,15 @@ build.sh                          构建并组装 .app（ad-hoc 签名）
 
 ### 说明
 
-- App 未开沙箱（无 entitlements），否则无法管理子进程；产物为自签名（默认 ad-hoc，也可用固定身份签名），可直接运行，不触发 Gatekeeper 隔离。
-- 固定签名身份（推荐本地配置一次）：`./scripts/setup-signing.sh` 导入自签名证书后，所有构建用同一身份签名，
-  macOS 会把每次构建/自动更新认作同一个 App，隐私授权（如"下载文件夹"弹窗）点一次"允许"即永久记住。
+- **签名与 Gatekeeper**：App 未开沙箱（无 entitlements），否则无法管理子进程。构建统一用固定自签名身份
+  「DeepSeek Harness Dev」（证书含 Code Signing 扩展用途；未配置该身份时回退 ad-hoc 签名）。
+  自签名与 ad-hoc 都**无法**通过 Gatekeeper 的「已识别开发者」校验：本地构建直接打开没问题，但从网上下载的
+  App 会被打上隔离属性，首次打开弹「无法验证开发者」——按上面「下载现成 App」一节的右键 → 打开或 `xattr`
+  命令放行即可。彻底消除警告需要 Apple Developer ID 签名 + 公证（付费开发者账号），免费方案做不到。
+- **固定签名身份的意义**（推荐本地配置一次）：`./scripts/setup-signing.sh` 导入自签名证书后，所有构建用同一
+  身份签名，macOS 会把每次构建/自动更新认作同一个 App，隐私授权（如"下载文件夹"弹窗）点一次"允许"即永久记住。
+  证书用仓库内 `scripts/signing.cnf` 生成；build.sh 会拒绝缺少 Code Signing EKU 的证书并回退 ad-hoc，
+  避免出现「已损坏」。
 - 开机自启：在「系统设置 → 通用 → 登录项」里手动添加本 App。
 - 若构建产物曾被 `open` 启动，会被 macOS 启动器登记，可能出现两个同名图标；日常只从 `~/Applications` 打开即可。
 
@@ -166,6 +187,8 @@ cp -R "dist/DeepSeek Harness.app" ~/Applications/
 open -a "DeepSeek Harness"
 ```
 
+Locally built apps carry no download quarantine attribute, so `open` runs them right away; see Notes below for how builds are signed.
+
 ### Download a ready-made app (no Xcode needed)
 
 Skip building entirely and grab the CI-built universal bundle (Apple Silicon + Intel):
@@ -173,10 +196,24 @@ Skip building entirely and grab the CI-built universal bundle (Apple Silicon + I
 1. Open the [Releases](https://github.com/wheam/deepseek-harness-mac-app/releases) page and download the latest `DeepSeek-Harness.zip`
    (the [rolling "latest" build](https://github.com/wheam/deepseek-harness-mac-app/releases/tag/latest) always tracks the main branch);
 2. Unzip and drag `DeepSeek Harness.app` into `/Applications` (or `~/Applications`);
-3. First launch: the app is ad-hoc signed, so **right-click → Open** to allow it,
-   or run: `xattr -dr com.apple.quarantine "/Applications/DeepSeek Harness.app"`.
-4. No manual updates after that: on every launch the app checks for and applies
-   updates to itself and to a globally installed dsh CLI (`--no-auto-update` disables this).
+3. First launch: the app is signed with a self-signed certificate (no Apple Developer ID), and downloaded apps
+   carry a quarantine attribute, so Gatekeeper shows "cannot be opened because the developer cannot be verified".
+   That is macOS's standard behavior for any non-Apple-certified developer; the app itself is not damaged.
+   Allow it either way:
+   - **right-click the app → Open** (easiest; auto-updates reuse the same signing identity, so you normally approve only once), or
+   - strip the quarantine attribute first, then double-click:
+     ```sh
+     xattr -dr com.apple.quarantine "/Applications/DeepSeek Harness.app"
+     # or, to remove every extended attribute: xattr -cr "/Applications/DeepSeek Harness.app"
+     ```
+4. No manual updates after that: on every launch the app checks for and applies updates to itself and to a
+   globally installed dsh CLI (auto-updates strip quarantine too; `--no-auto-update` disables this).
+
+> If macOS says the app "is damaged and can't be opened", signature validation failed (e.g. the file was altered
+> during download/unzip, or the signing certificate expired or is malformed). Run
+> `xattr -cr "/Applications/DeepSeek Harness.app"` and it will launch; if it still complains, re-download.
+> Fully removing the warning requires an Apple Developer ID certificate + notarization (paid Apple Developer
+> Program, $99/yr), which this project does not use.
 
 ### Debug flags
 
@@ -209,7 +246,9 @@ Info.plist
 resources/AppIcon.icns            ready-made app icon (regenerated on build)
 resources/app-icon-preview.png    icon preview
 scripts/make-icon.swift           icon generator (black whale on white)
-build.sh                          builds and assembles the .app (ad-hoc signed)
+scripts/setup-signing.sh          installs the fixed self-signed identity (Code Signing EKU verified)
+scripts/signing.cnf               OpenSSL config for the self-signed certificate (Code Signing EKU)
+build.sh                          builds and assembles the .app (fixed self-signed identity, ad-hoc fallback)
 ```
 
 ### Design decisions
@@ -223,8 +262,18 @@ build.sh                          builds and assembles the .app (ad-hoc signed)
 
 ### Notes
 
-- The app is not sandboxed (no entitlements), because it manages child processes; builds are self-signed (ad-hoc by default, or with a fixed identity) and run without Gatekeeper prompts.
-- Fixed signing identity (recommended one-time local setup): `./scripts/setup-signing.sh` imports a self-signed certificate, after which every build and auto-update carries the same identity — macOS treats them as one app and remembers privacy grants (like the Downloads-folder prompt) permanently after a single "Allow".
+- **Signing & Gatekeeper**: the app is not sandboxed (no entitlements), because it manages child processes. Builds are
+  uniformly signed with the fixed self-signed identity "DeepSeek Harness Dev" (its certificate carries the Code Signing
+  extended key usage; ad-hoc when that identity isn't set up). Neither self-signed nor ad-hoc passes Gatekeeper's
+  "identified developer" check: locally built apps run fine, but a downloaded app carries a quarantine attribute and
+  shows the "unidentified developer" warning on first launch — allow it with right-click → Open or the `xattr` command
+  from the download guide above. Removing the warning entirely requires an Apple Developer ID certificate +
+  notarization (paid Apple Developer Program).
+- Fixed signing identity (recommended one-time local setup): `./scripts/setup-signing.sh` imports a self-signed
+  certificate, after which every build and auto-update carries the same identity — macOS treats them as one app and
+  remembers privacy grants (like the Downloads-folder prompt) permanently after a single "Allow". Generate the
+  certificate with the repo's `scripts/signing.cnf`; build.sh refuses certificates without the Code Signing EKU
+  (falling back to ad-hoc) so they cannot produce "damaged" builds.
 - Launch at login: add the app manually in System Settings → General → Login Items.
 - If a build artifact was ever launched with `open`, macOS registers it with the launcher and you may see two same-named icons; just always open the copy in `~/Applications`.
 

@@ -9,6 +9,18 @@ on:
 permissions:
   contents: write
 
+env:
+  # Shown on every release. The app carries a self-signed signature (no paid
+  # Apple Developer ID), so Gatekeeper blocks the downloaded app on first
+  # launch; keep these notes in sync with the README's download guide.
+  RELEASE_NOTES: |
+    **First launch:** this build is signed with a self-signed identity (no Apple Developer ID), so macOS Gatekeeper shows an "unidentified developer" warning when you first open the downloaded app. To allow it:
+
+    - Right-click (Ctrl-click) the app in Finder → **Open**, then confirm, **or**
+    - run: `xattr -dr com.apple.quarantine "/Applications/DeepSeek Harness.app"` (or `xattr -cr ...`)
+
+    Removing the warning entirely requires an Apple Developer ID certificate + notarization (paid Apple Developer Program). See the README for details.
+
 jobs:
   build:
     runs-on: macos-14
@@ -29,17 +41,34 @@ jobs:
             security set-key-partition-list -S apple-tool:,apple: -s -k "$P12_PASSWORD" /tmp/dsh-signing.keychain-db
             security list-keychains -d user -s /tmp/dsh-signing.keychain-db
             rm -f /tmp/dsh-dev.p12
-            echo "signing identity ready"
+            # The certificate must carry the Code Signing EKU
+            # (1.3.6.1.5.5.7.3.3); without it a downloaded copy can be
+            # reported as "damaged" instead of "unidentified developer".
+            # Fail the build rather than ship a bad certificate.
+            if ! security find-certificate -c "DeepSeek Harness Dev" -p /tmp/dsh-signing.keychain-db \
+                 | openssl x509 -noout -purpose | grep -q "Code signing : Yes"; then
+              echo "::error::imported certificate lacks the Code Signing EKU; regenerate the p12 with scripts/signing.cnf (see scripts/setup-signing.sh)"
+              exit 1
+            fi
+            echo "CODESIGN_IDENTITY=DeepSeek Harness Dev" >> "$GITHUB_ENV"
+            echo "CODESIGN_KEYCHAIN=/tmp/dsh-signing.keychain-db" >> "$GITHUB_ENV"
+            echo "CODESIGN_KEYCHAIN_PASSWORD=$P12_PASSWORD" >> "$GITHUB_ENV"
+            echo "signing identity ready (Code Signing EKU verified)"
           else
-            echo "no signing secrets; builds fall back to ad-hoc"
+            echo "no signing secrets; build.sh falls back to ad-hoc"
           fi
 
       - name: Build universal app bundle
-        env:
-          CODESIGN_IDENTITY: "DeepSeek Harness Dev"
-          CODESIGN_KEYCHAIN: /tmp/dsh-signing.keychain-db
-          CODESIGN_KEYCHAIN_PASSWORD: ${{ secrets.GH_CODESIGN_P12_PASSWORD }}
         run: UNIVERSAL=1 ./build.sh
+
+      - name: Verify code signature
+        run: |
+          codesign --verify --deep --strict --verbose=2 "dist/DeepSeek Harness.app"
+          codesign -dv --verbose=2 "dist/DeepSeek Harness.app"
+          # Gatekeeper rejects both self-signed and ad-hoc signatures; log
+          # the assessment for transparency (the warning is expected, see
+          # the README's download guide for the first-launch steps).
+          spctl -a -vv --type execute "dist/DeepSeek Harness.app" || true
 
       - name: Package zip
         run: |
@@ -59,7 +88,7 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/')
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release create "$GITHUB_REF_NAME" DeepSeek-Harness.zip --generate-notes
+        run: gh release create "$GITHUB_REF_NAME" DeepSeek-Harness.zip --notes "$RELEASE_NOTES"
 
       - name: Publish rolling "latest" release
         if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
@@ -69,5 +98,5 @@ jobs:
           gh release delete latest --yes --cleanup-tag || true
           gh release create latest DeepSeek-Harness.zip \
             --title "Latest build" \
-            --notes "Automatically built from the default branch. Universal (Apple Silicon + Intel), ad-hoc signed. First launch: right-click the app and choose Open, or run: xattr -dr com.apple.quarantine \"/Applications/DeepSeek Harness.app\"" \
+            --notes "$RELEASE_NOTES" \
             --prerelease

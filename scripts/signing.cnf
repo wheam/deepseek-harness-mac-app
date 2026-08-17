@@ -1,0 +1,23 @@
+# OpenSSL config for the DeepSeek Harness self-signed code-signing
+# certificate (see scripts/setup-signing.sh).
+#
+# The Code Signing extended key usage (1.3.6.1.5.5.7.3.3) is REQUIRED:
+# build.sh verifies it before signing, and a certificate without it can make
+# Gatekeeper report a downloaded copy as "damaged" instead of merely
+# "unidentified developer".
+
+[req]
+distinguished_name = dn
+x509_extensions = codesign_ext
+prompt = no
+
+[dn]
+CN = DeepSeek Harness Dev
+OU = DSH
+O = wheam
+
+[codesign_ext]
+basicConstraints = critical,CA:FALSE
+keyUsage = critical,digitalSignature
+extendedKeyUsage = codeSigning
+subjectKeyIdentifier = hash
