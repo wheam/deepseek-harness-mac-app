@@ -64,22 +64,33 @@ echo "==> codesign"
 SIGNING_KEYCHAIN="${CODESIGN_KEYCHAIN:-$HOME/Library/Keychains/dsh-signing.keychain-db}"
 SIGNING_IDENTITY="${CODESIGN_IDENTITY:-DeepSeek Harness Dev}"
 SIGNED_WITH="ad-hoc"
+# The certificate embedded in the bundle must carry the Code Signing
+# extended key usage (1.3.6.1.5.5.7.3.3); without it Gatekeeper can report
+# a quarantined copy as "damaged" instead of merely "unidentified
+# developer". Check the actual signed output (codesign --extract-certificates
+# + openssl) rather than the keychain, where `security find-certificate` is
+# unreliable across macOS versions.
+has_code_signing_eku() {
+  local dir rc app
+  app="$(cd "$(dirname "$1")" && pwd -P)/$(basename "$1")"
+  dir="$(mktemp -d)"
+  ( cd "$dir" \
+      && codesign -d --extract-certificates "$app" >/dev/null 2>&1 \
+      && openssl x509 -inform DER -in codesign0 -noout -purpose 2>/dev/null \
+         | grep -q "Code signing : Yes" )
+  rc=$?
+  rm -rf "$dir"
+  return $rc
+}
 if [ -n "$SIGNING_IDENTITY" ] && [ -f "$SIGNING_KEYCHAIN" ]; then
   security unlock-keychain -p "${CODESIGN_KEYCHAIN_PASSWORD:-dshdev}" "$SIGNING_KEYCHAIN" >/dev/null 2>&1 || true
-  # The certificate must carry the Code Signing extended key usage
-  # (1.3.6.1.5.5.7.3.3); without it Gatekeeper can report a quarantined
-  # copy as "damaged" instead of merely "unidentified developer".
-  CERT_PURPOSE="$(security find-certificate -c "$SIGNING_IDENTITY" -p "$SIGNING_KEYCHAIN" 2>/dev/null \
-                 | openssl x509 -noout -purpose 2>/dev/null || true)"
-  if [ -z "$CERT_PURPOSE" ]; then
-    echo "warning: no certificate \"$SIGNING_IDENTITY\" in $SIGNING_KEYCHAIN, falling back to ad-hoc"
-  elif ! printf '%s' "$CERT_PURPOSE" | grep -q "Code signing : Yes"; then
-    echo "warning: \"$SIGNING_IDENTITY\" certificate lacks the Code Signing EKU, falling back to ad-hoc"
-  elif codesign --force --deep --sign "$SIGNING_IDENTITY" --keychain "$SIGNING_KEYCHAIN" "$OUT" >/dev/null 2>&1 \
-       && codesign --verify --deep --strict "$OUT" >/dev/null 2>&1; then
-    SIGNED_WITH="$SIGNING_IDENTITY"
-  else
+  if ! codesign --force --deep --sign "$SIGNING_IDENTITY" --keychain "$SIGNING_KEYCHAIN" "$OUT" >/dev/null 2>&1 \
+       || ! codesign --verify --deep --strict "$OUT" >/dev/null 2>&1; then
     echo "warning: signing with \"$SIGNING_IDENTITY\" failed, falling back to ad-hoc"
+  elif ! has_code_signing_eku "$OUT"; then
+    echo "warning: \"$SIGNING_IDENTITY\" certificate lacks the Code Signing EKU, falling back to ad-hoc"
+  else
+    SIGNED_WITH="$SIGNING_IDENTITY"
   fi
 fi
 if [ "$SIGNED_WITH" = "ad-hoc" ]; then
