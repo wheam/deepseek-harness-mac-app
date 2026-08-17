@@ -79,6 +79,12 @@ has_code_signing_eku() {
       && openssl x509 -inform DER -in codesign0 -noout -purpose 2>/dev/null \
          | grep -Eqi "code signing *: *yes" )
   rc=$?
+  if [ "$rc" -ne 0 ]; then
+    echo "debug: EKU check failed on $app (workdir $dir):" >&2
+    ( cd "$dir" \
+        && codesign -d --extract-certificates "$app" 2>&1 \
+        && ls -la ) 2>&1 | sed 's/^/debug:   /' >&2
+  fi
   rm -rf "$dir"
   return $rc
 }
