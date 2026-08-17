@@ -34,16 +34,6 @@ jobs:
         run: |
           if [ -n "$P12_BASE64" ] && [ -n "$P12_PASSWORD" ]; then
             echo "$P12_BASE64" | base64 -d > /tmp/dsh-dev.p12
-            # The certificate must carry the Code Signing EKU
-            # (1.3.6.1.5.5.7.3.3); without it a downloaded copy can be
-            # reported as "damaged" instead of "unidentified developer".
-            # Fail the build rather than ship a bad certificate. Parse the
-            # p12 with openssl directly (deterministic on every macOS).
-            if ! openssl pkcs12 -in /tmp/dsh-dev.p12 -passin pass:"$P12_PASSWORD" -nokeys -clcerts 2>/dev/null \
-                 | openssl x509 -noout -purpose 2>/dev/null | grep -q "Code signing : Yes"; then
-              echo "::error::the p12 certificate lacks the Code Signing EKU; regenerate it with scripts/signing.cnf (see scripts/setup-signing.sh)"
-              exit 1
-            fi
             security create-keychain -p "$P12_PASSWORD" /tmp/dsh-signing.keychain-db
             security set-keychain-settings -lut 21600 /tmp/dsh-signing.keychain-db
             security unlock-keychain -p "$P12_PASSWORD" /tmp/dsh-signing.keychain-db
@@ -51,10 +41,14 @@ jobs:
             security set-key-partition-list -S apple-tool:,apple: -s -k "$P12_PASSWORD" /tmp/dsh-signing.keychain-db
             security list-keychains -d user -s /tmp/dsh-signing.keychain-db
             rm -f /tmp/dsh-dev.p12
+            # The certificate must carry the Code Signing EKU
+            # (1.3.6.1.5.5.7.3.3); it is enforced on the shipped bundle in
+            # the "Verify code signature" step (build.sh also falls back to
+            # ad-hoc when it is missing).
             echo "CODESIGN_IDENTITY=DeepSeek Harness Dev" >> "$GITHUB_ENV"
             echo "CODESIGN_KEYCHAIN=/tmp/dsh-signing.keychain-db" >> "$GITHUB_ENV"
             echo "CODESIGN_KEYCHAIN_PASSWORD=$P12_PASSWORD" >> "$GITHUB_ENV"
-            echo "signing identity ready (Code Signing EKU verified)"
+            echo "signing identity ready"
           else
             echo "no signing secrets; build.sh falls back to ad-hoc"
           fi
@@ -70,6 +64,17 @@ jobs:
           # the assessment for transparency (the warning is expected, see
           # the README's download guide for the first-launch steps).
           spctl -a -vv --type execute "dist/DeepSeek Harness.app" || true
+          if [ -n "${CODESIGN_IDENTITY:-}" ]; then
+            # The fixed identity was requested, so the shipped bundle must
+            # embed a certificate with the Code Signing EKU
+            # (1.3.6.1.5.5.7.3.3); without it a downloaded copy can be
+            # reported as "damaged" instead of "unidentified developer".
+            # Fail the build rather than ship a bad certificate.
+            mkdir -p /tmp/dsh-certs && cd /tmp/dsh-certs
+            codesign -d --extract-certificates "$GITHUB_WORKSPACE/dist/DeepSeek Harness.app"
+            openssl x509 -inform DER -in codesign0 -noout -purpose | grep -Eqi "code signing *: *yes" \
+              || { echo "::error::shipped bundle lacks a certificate with the Code Signing EKU; regenerate the p12 with scripts/signing.cnf (see scripts/setup-signing.sh)"; exit 1; }
+          fi
 
       - name: Package zip
         run: |

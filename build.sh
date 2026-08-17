@@ -77,7 +77,7 @@ has_code_signing_eku() {
   ( cd "$dir" \
       && codesign -d --extract-certificates "$app" >/dev/null 2>&1 \
       && openssl x509 -inform DER -in codesign0 -noout -purpose 2>/dev/null \
-         | grep -q "Code signing : Yes" )
+         | grep -Eqi "code signing *: *yes" )
   rc=$?
   rm -rf "$dir"
   return $rc

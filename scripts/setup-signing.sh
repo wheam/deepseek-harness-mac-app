@@ -44,7 +44,7 @@ if [ -z "$IDENTITY" ]; then
   exit 1
 fi
 if ! security find-certificate -c "$IDENTITY" -p "$KEYCHAIN" 2>/dev/null \
-     | openssl x509 -noout -purpose 2>/dev/null | grep -q "Code signing : Yes"; then
+     | openssl x509 -noout -purpose 2>/dev/null | grep -Eqi "code signing *: *yes"; then
   echo "error: certificate \"$IDENTITY\" lacks the Code Signing extended key usage;" >&2
   echo "       regenerate the p12 with scripts/signing.cnf (see the comment above)" >&2
   exit 1
