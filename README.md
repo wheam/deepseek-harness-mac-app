@@ -63,19 +63,30 @@ open -a "DeepSeek Harness"
 
 ### 下载现成 App（无需 Xcode）
 
-不想装构建工具的直接下载 CI 自动构建的成品（universal：Apple Silicon 与 Intel 通用）：
+不想装构建工具的直接下载 CI 自动构建的成品（universal：Apple Silicon 与 Intel 通用）。
+
+**推荐：一条命令安装（无 Gatekeeper 警告）**
+
+```sh
+curl -fsSL https://github.com/wheam/deepseek-harness-mac-app/releases/download/latest/install.sh | sh
+```
+
+脚本会下载最新的 `DeepSeek-Harness.zip`、校验代码签名、安装到 `/Applications`（无写权限时用 `~/Applications`）并打开。
+因为不是浏览器下载，App 不带隔离（quarantine）属性，**首次打开不会有任何「无法验证开发者」警告**。
+
+**或手动下载：**
 
 1. 打开 [Releases](https://github.com/wheam/deepseek-harness-mac-app/releases) 页，下载最新版的 `DeepSeek-Harness.zip`
    （[latest 滚动构建](https://github.com/wheam/deepseek-harness-mac-app/releases/tag/latest) 总是跟随 main 分支）；
 2. 解压，把 `DeepSeek Harness.app` 拖入 `/Applications`（或 `~/Applications`）；
 3. 首次打开：本 App 用自签名证书签名（无 Apple Developer ID），浏览器下载会打上隔离（quarantine）属性，
-   macOS Gatekeeper 因此会弹「无法打开，因为无法验证开发者」。这是 macOS 对所有非 Apple 认证开发者的统一行为，
-   App 本身没有损坏。放行方式任选其一：
-   - **右键点击 App → 打开**（最省事；自动更新沿用同一签名身份，通常只需放行一次）；
-   - 或先移除隔离属性再双击：
+   macOS Gatekeeper 因此会拦截。这是 macOS 对所有非 Apple 认证开发者的统一行为，App 本身没有损坏。放行方式任选其一：
+   - **macOS 15+（Sequoia/Tahoe）**：双击被拦后，打开 **系统设置 → 隐私与安全性 → 安全性**，点 **「仍要打开」** 并确认
+     （macOS 15 起已移除「右键 → 打开」的绕过入口）；
+   - **macOS 13/14**：右键（Ctrl 点击）App → **打开**，再确认一次即可；
+   - 或先移除隔离属性再双击（所有版本通用）：
      ```sh
-     xattr -dr com.apple.quarantine "/Applications/DeepSeek Harness.app"
-     # 或更彻底地移除全部扩展属性：xattr -cr "/Applications/DeepSeek Harness.app"
+     xattr -cr "/Applications/DeepSeek Harness.app"
      ```
 4. 之后无需手动更新：App 每次启动会自动检查并更新自身与全局安装的 dsh CLI（自动更新会顺带移除隔离属性；
    可用 `--no-auto-update` 关闭）。
@@ -118,6 +129,7 @@ scripts/make-icon.swift           图标生成（白底黑鲸鱼）
 scripts/setup-signing.sh          安装固定自签名身份（含 Code Signing EKU 校验）
 scripts/signing.cnf               自签名证书 OpenSSL 配置（Code Signing EKU）
 build.sh                          构建并组装 .app（固定自签名身份，回退 ad-hoc）
+install.sh                        curl 一键安装脚本（下载、校验签名、安装并打开，无隔离属性）
 ```
 
 ### 设计决策（为什么这样做）
@@ -134,8 +146,9 @@ build.sh                          构建并组装 .app（固定自签名身份�
 - **签名与 Gatekeeper**：App 未开沙箱（无 entitlements），否则无法管理子进程。构建统一用固定自签名身份
   「DeepSeek Harness Dev」（证书含 Code Signing 扩展用途；未配置该身份时回退 ad-hoc 签名）。
   自签名与 ad-hoc 都**无法**通过 Gatekeeper 的「已识别开发者」校验：本地构建直接打开没问题，但从网上下载的
-  App 会被打上隔离属性，首次打开弹「无法验证开发者」——按上面「下载现成 App」一节的右键 → 打开或 `xattr`
-  命令放行即可。彻底消除警告需要 Apple Developer ID 签名 + 公证（付费开发者账号），免费方案做不到。
+  App 会被打上隔离属性，首次打开被 Gatekeeper 拦截——用「下载现成 App」一节的一键安装脚本（无隔离属性、
+  无警告），或按其中的「仍要打开」/`xattr` 步骤放行。彻底消除警告需要 Apple Developer ID 签名 + 公证
+  （付费开发者账号），免费方案做不到。
 - **固定签名身份的意义**（推荐本地配置一次）：`./scripts/setup-signing.sh` 导入自签名证书后，所有构建用同一
   身份签名，macOS 会把每次构建/自动更新认作同一个 App，隐私授权（如"下载文件夹"弹窗）点一次"允许"即永久记住。
   证书用仓库内 `scripts/signing.cnf` 生成；build.sh 会拒绝缺少 Code Signing EKU 的证书并回退 ad-hoc，
@@ -191,20 +204,30 @@ Locally built apps carry no download quarantine attribute, so `open` runs them r
 
 ### Download a ready-made app (no Xcode needed)
 
-Skip building entirely and grab the CI-built universal bundle (Apple Silicon + Intel):
+Skip building entirely and grab the CI-built universal bundle (Apple Silicon + Intel).
+
+**Recommended: one-line install (no Gatekeeper warning)**
+
+```sh
+curl -fsSL https://github.com/wheam/deepseek-harness-mac-app/releases/download/latest/install.sh | sh
+```
+
+The script downloads the latest `DeepSeek-Harness.zip`, verifies the code signature, installs it into `/Applications` (or `~/Applications` if that isn't writable) and opens the app. Because it is not a browser download, the app carries no quarantine attribute and opens with **no "unidentified developer" warning at all**.
+
+**Or download manually:**
 
 1. Open the [Releases](https://github.com/wheam/deepseek-harness-mac-app/releases) page and download the latest `DeepSeek-Harness.zip`
    (the [rolling "latest" build](https://github.com/wheam/deepseek-harness-mac-app/releases/tag/latest) always tracks the main branch);
 2. Unzip and drag `DeepSeek Harness.app` into `/Applications` (or `~/Applications`);
 3. First launch: the app is signed with a self-signed certificate (no Apple Developer ID), and downloaded apps
-   carry a quarantine attribute, so Gatekeeper shows "cannot be opened because the developer cannot be verified".
-   That is macOS's standard behavior for any non-Apple-certified developer; the app itself is not damaged.
-   Allow it either way:
-   - **right-click the app → Open** (easiest; auto-updates reuse the same signing identity, so you normally approve only once), or
-   - strip the quarantine attribute first, then double-click:
+   carry a quarantine attribute, so Gatekeeper blocks the first launch. That is macOS's standard behavior for any
+   non-Apple-certified developer; the app itself is not damaged. Allow it either way:
+   - **macOS 15+ (Sequoia/Tahoe)**: after the blocked first attempt, open **System Settings → Privacy & Security → Security**
+     and click **"Open Anyway"** (the right-click → Open override was removed in macOS 15), or
+   - **macOS 13/14**: right-click (Ctrl-click) the app → **Open**, then confirm, or
+   - strip the quarantine attribute first, then double-click (any version):
      ```sh
-     xattr -dr com.apple.quarantine "/Applications/DeepSeek Harness.app"
-     # or, to remove every extended attribute: xattr -cr "/Applications/DeepSeek Harness.app"
+     xattr -cr "/Applications/DeepSeek Harness.app"
      ```
 4. No manual updates after that: on every launch the app checks for and applies updates to itself and to a
    globally installed dsh CLI (auto-updates strip quarantine too; `--no-auto-update` disables this).
@@ -249,6 +272,7 @@ scripts/make-icon.swift           icon generator (black whale on white)
 scripts/setup-signing.sh          installs the fixed self-signed identity (Code Signing EKU verified)
 scripts/signing.cnf               OpenSSL config for the self-signed certificate (Code Signing EKU)
 build.sh                          builds and assembles the .app (fixed self-signed identity, ad-hoc fallback)
+install.sh                        one-line curl installer (downloads, verifies the signature, installs and opens, no quarantine)
 ```
 
 ### Design decisions
@@ -265,10 +289,10 @@ build.sh                          builds and assembles the .app (fixed self-sign
 - **Signing & Gatekeeper**: the app is not sandboxed (no entitlements), because it manages child processes. Builds are
   uniformly signed with the fixed self-signed identity "DeepSeek Harness Dev" (its certificate carries the Code Signing
   extended key usage; ad-hoc when that identity isn't set up). Neither self-signed nor ad-hoc passes Gatekeeper's
-  "identified developer" check: locally built apps run fine, but a downloaded app carries a quarantine attribute and
-  shows the "unidentified developer" warning on first launch — allow it with right-click → Open or the `xattr` command
-  from the download guide above. Removing the warning entirely requires an Apple Developer ID certificate +
-  notarization (paid Apple Developer Program).
+  "identified developer" check: locally built apps run fine, but a browser-downloaded app carries a quarantine
+  attribute and is blocked on first launch — use the one-line installer (no quarantine, no warning) or the
+  "Open Anyway" / `xattr` steps from the download guide above. Removing the warning for browser downloads entirely
+  requires an Apple Developer ID certificate + notarization (paid Apple Developer Program).
 - Fixed signing identity (recommended one-time local setup): `./scripts/setup-signing.sh` imports a self-signed
   certificate, after which every build and auto-update carries the same identity — macOS treats them as one app and
   remembers privacy grants (like the Downloads-folder prompt) permanently after a single "Allow". Generate the

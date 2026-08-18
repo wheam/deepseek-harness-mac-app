@@ -11,15 +11,25 @@ permissions:
 
 env:
   # Shown on every release. The app carries a self-signed signature (no paid
-  # Apple Developer ID), so Gatekeeper blocks the downloaded app on first
-  # launch; keep these notes in sync with the README's download guide.
+  # Apple Developer ID), so a *browser* download triggers Gatekeeper on first
+  # launch; the one-line installer avoids the quarantine attribute entirely.
+  # Keep these notes in sync with the README's download guide.
   RELEASE_NOTES: |
-    **First launch:** this build is signed with a self-signed identity (no Apple Developer ID), so macOS Gatekeeper shows an "unidentified developer" warning when you first open the downloaded app. To allow it:
+    **One-line install (no Gatekeeper warning):**
 
-    - Right-click (Ctrl-click) the app in Finder → **Open**, then confirm, **or**
-    - run: `xattr -dr com.apple.quarantine "/Applications/DeepSeek Harness.app"` (or `xattr -cr ...`)
+    ```sh
+    curl -fsSL https://github.com/wheam/deepseek-harness-mac-app/releases/download/latest/install.sh | sh
+    ```
 
-    Removing the warning entirely requires an Apple Developer ID certificate + notarization (paid Apple Developer Program). See the README for details.
+    The installer downloads `DeepSeek-Harness.zip`, verifies the code signature, installs into `/Applications` (or `~/Applications` if that isn't writable) and opens the app. Because it is not a browser download, the app carries no quarantine attribute — no warning, no extra steps.
+
+    **Manual download:** this build is signed with a self-signed identity (no Apple Developer ID), so a browser download triggers Gatekeeper on first launch. To allow it:
+
+    - macOS 15+ (Sequoia/Tahoe): after the blocked first attempt, open **System Settings → Privacy & Security → Security** and click **"Open Anyway"** (the right-click → Open override was removed in macOS 15), **or**
+    - macOS 13/14: right-click (Ctrl-click) the app in Finder → **Open**, then confirm, **or**
+    - run: `xattr -cr "/Applications/DeepSeek Harness.app"`
+
+    Removing the warning for browser downloads entirely requires an Apple Developer ID certificate + notarization (paid Apple Developer Program). See the README for details.
 
 jobs:
   build:
@@ -58,6 +68,7 @@ jobs:
 
       - name: Verify code signature
         run: |
+          bash -n install.sh
           codesign --verify --deep --strict --verbose=2 "dist/DeepSeek Harness.app"
           codesign -dv --verbose=2 "dist/DeepSeek Harness.app"
           # Gatekeeper rejects both self-signed and ad-hoc signatures; log
@@ -94,7 +105,7 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/')
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release create "$GITHUB_REF_NAME" DeepSeek-Harness.zip --notes "$RELEASE_NOTES"
+        run: gh release create "$GITHUB_REF_NAME" DeepSeek-Harness.zip install.sh --notes "$RELEASE_NOTES"
 
       - name: Publish rolling "latest" release
         if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
@@ -102,7 +113,7 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh release delete latest --yes --cleanup-tag || true
-          gh release create latest DeepSeek-Harness.zip \
+          gh release create latest DeepSeek-Harness.zip install.sh \
             --title "Latest build" \
             --notes "$RELEASE_NOTES" \
             --prerelease
