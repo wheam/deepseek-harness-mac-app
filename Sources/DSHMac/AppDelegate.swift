@@ -15,6 +15,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ServerControllerDelega
   private var webVC: WebViewController?
   private var distributedObserver: NSObjectProtocol?
   private var terminateHandled = false
+  private var shellUpdateScheduled = false
+  private var installerPollGeneration = 0
 
   init(options: LaunchOptions) {
     self.options = options
@@ -48,19 +50,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ServerControllerDelega
     buildMenu()
     buildWindow()
     showMainWindow()
-    // Auto-update the global dsh CLI first (so the spawned server runs the
-    // new version), then start the server; the shell self-update check runs
-    // in the background once everything is up.
+    // Resolve an existing global CLI or install it automatically, then update
+    // it when enabled before starting the server. The shell self-update check
+    // runs in the background once everything is up.
     let updater = AppUpdater(server: server, noAutoUpdate: options.noAutoUpdate)
     self.updater = updater
-    updater.updateDshCliIfNeeded(
-      onStatus: { [weak self] status in self?.webVC?.showStatus(status) }
-    ) { [weak self] in
-      self?.server.start()
-    }
-    DispatchQueue.main.asyncAfter(deadline: .now() + 6) { [weak self] in
-      self?.updater?.checkShellUpdate()
-    }
+    prepareDshAndStartServer()
   }
 
   func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
@@ -104,7 +99,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ServerControllerDelega
   }
 
   func serverController(_ controller: ServerController, didFail message: String, canInstallDsh: Bool) {
-    presentFailure(message, canInstallDsh: canInstallDsh)
+    if canInstallDsh {
+      // A CLI that disappeared between preparation and spawn is treated like
+      // first launch: repair it automatically instead of asking permission.
+      prepareDshAndStartServer()
+    } else {
+      presentFailure(message, retryPreparesDsh: false, offersFullInstaller: false)
+    }
   }
 
   // MARK: - Window
@@ -182,27 +183,70 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ServerControllerDelega
     return true
   }
 
-  // MARK: - Failure and install flows
+  // MARK: - CLI preparation and failures
 
-  private func presentFailure(_ message: String, canInstallDsh: Bool) {
+  private func prepareDshAndStartServer() {
+    guard let updater else { return }
+    updater.prepareDshCli(
+      onStatus: { [weak self] status in self?.webVC?.showStatus(status) }
+    ) { [weak self] result in
+      guard let self else { return }
+      switch result {
+      case .ready:
+        self.server.start()
+        self.scheduleShellUpdateOnce()
+      case .failed(let message, let offersFullInstaller):
+        self.presentFailure(
+          message,
+          retryPreparesDsh: true,
+          offersFullInstaller: offersFullInstaller)
+      }
+    }
+  }
+
+  private func scheduleShellUpdateOnce() {
+    guard !shellUpdateScheduled else { return }
+    shellUpdateScheduled = true
+    DispatchQueue.main.asyncAfter(deadline: .now() + 6) { [weak self] in
+      self?.updater?.checkShellUpdate()
+    }
+  }
+
+  private func presentFailure(
+    _ message: String,
+    retryPreparesDsh: Bool,
+    offersFullInstaller: Bool
+  ) {
     AppLog.shared.error("app: presenting failure dialog: \(message)")
     let alert = NSAlert()
     alert.alertStyle = .critical
     alert.messageText = "无法启动 DeepSeek Harness"
     alert.informativeText = message
     alert.addButton(withTitle: "重试")
-    if canInstallDsh { alert.addButton(withTitle: "安装 dsh") }
+    if offersFullInstaller { alert.addButton(withTitle: "运行完整安装程序") }
     alert.addButton(withTitle: "查看日志")
     alert.addButton(withTitle: "退出")
     let completion: (NSApplication.ModalResponse) -> Void = { [weak self] response in
       guard let self else { return }
       switch response {
       case .alertFirstButtonReturn:
-        self.server.start()
+        if retryPreparesDsh {
+          self.prepareDshAndStartServer()
+        } else {
+          self.server.start()
+        }
       case .alertSecondButtonReturn:
-        if canInstallDsh { self.installDsh() } else { self.openLog() }
+        if offersFullInstaller {
+          self.runFullInstallerInTerminal()
+        } else {
+          self.openLog()
+        }
       case .alertThirdButtonReturn:
-        self.openLog()
+        if offersFullInstaller {
+          self.openLog()
+        } else {
+          NSApp.terminate(nil)
+        }
       default:
         NSApp.terminate(nil)
       }
@@ -214,84 +258,65 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ServerControllerDelega
     }
   }
 
-  /// Run `npm install -g @deepseek-ai/dsh` behind a cancellable progress sheet.
-  private func installDsh() {
-    guard let npm = resolveNpm() else {
-      presentFailure("未找到 npm 命令。请手动运行：npm i -g @deepseek-ai/dsh", canInstallDsh: false)
-      return
-    }
-    AppLog.shared.info("install: running \(npm) install -g @deepseek-ai/dsh")
+  /// Open the supported curl bootstrap in Terminal. Node installation may
+  /// require an administrator password, which a GUI background process cannot
+  /// request silently; Terminal keeps that interaction explicit and visible.
+  private func runFullInstallerInTerminal() {
+    let command = "/usr/bin/curl -fsSL https://github.com/wheam/deepseek-harness-mac-app/releases/download/latest/install.sh | /bin/sh -s -- --no-open"
+    let escaped = command
+      .replacingOccurrences(of: "\\", with: "\\\\")
+      .replacingOccurrences(of: "\"", with: "\\\"")
+    let script =
+      "tell application \"Terminal\"\nactivate\ndo script \"\(escaped)\"\nend tell"
     let process = Process()
-    process.executableURL = URL(fileURLWithPath: npm)
-    process.arguments = ["install", "-g", "@deepseek-ai/dsh"]
-    var environment = ProcessInfo.processInfo.environment
-    let inheritedPath = environment["PATH"] ?? "/usr/bin:/bin:/usr/sbin:/sbin"
-    environment["PATH"] = "/opt/homebrew/bin:/usr/local/bin:" + inheritedPath
-    process.environment = environment
-
-    let alert = NSAlert()
-    alert.messageText = "正在安装 DeepSeek Harness CLI…"
-    alert.informativeText = "运行 npm install -g @deepseek-ai/dsh，约需一两分钟。"
-    let progress = NSProgressIndicator(frame: NSRect(x: 0, y: 0, width: 280, height: 24))
-    progress.style = .spinning
-    progress.isIndeterminate = true
-    progress.startAnimation(nil)
-    alert.accessoryView = progress
-    alert.addButton(withTitle: "取消")
-
-    var output = Data()
-    let pipe = Pipe()
-    process.standardOutput = pipe
-    process.standardError = pipe
-    pipe.fileHandleForReading.readabilityHandler = { handle in
-      let data = handle.availableData
-      guard !data.isEmpty else { return }
-      DispatchQueue.main.async {
-        output.append(data)
-        let text = String(data: data, encoding: .utf8)?
-          .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        if !text.isEmpty { AppLog.shared.info("npm: \(text)") }
-      }
-    }
-    var finished = false
-    process.terminationHandler = { [weak self] done in
-      DispatchQueue.main.async {
-        guard let self else { return }
-        finished = true
-        pipe.fileHandleForReading.readabilityHandler = nil
-        if let parent = self.window ?? NSApp.keyWindow {
-          parent.endSheet(alert.window)
-        }
-        if done.terminationStatus == 0 {
-          AppLog.shared.info("install: npm install succeeded")
-          self.server.start()
-        } else {
-          let tail = String(data: output, encoding: .utf8) ?? ""
-          self.presentFailure(
-            "安装失败（退出码 \(done.terminationStatus)）。\n\n\(tail.suffix(800))",
-            canInstallDsh: false)
-        }
+    process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+    process.arguments = ["-e", script]
+    process.terminationHandler = { [weak self] finished in
+      if finished.terminationStatus == 0 {
+        AppLog.shared.info("install: opened full installer in Terminal")
+        DispatchQueue.main.async { self?.beginWaitingForFullInstaller() }
+      } else {
+        AppLog.shared.error("install: failed to open full installer in Terminal (code \(finished.terminationStatus))")
       }
     }
     do {
       try process.run()
     } catch {
-      presentFailure("无法启动 npm：\(error.localizedDescription)", canInstallDsh: false)
-      return
-    }
-    if let parent = window ?? NSApp.keyWindow {
-      alert.beginSheetModal(for: parent) { _ in
-        if !finished { process.terminate() } // user cancelled
-      }
-    } else {
-      alert.runModal()
-      if !finished { process.terminate() }
+      AppLog.shared.error("install: cannot launch Terminal installer: \(error.localizedDescription)")
+      presentFailure(
+        "无法打开终端安装程序：\(error.localizedDescription)",
+        retryPreparesDsh: true,
+        offersFullInstaller: false)
     }
   }
 
-  private func resolveNpm() -> String? {
-    ["/opt/homebrew/bin/npm", "/usr/local/bin/npm"]
-      .first(where: { FileManager.default.isExecutableFile(atPath: $0) })
+  private func beginWaitingForFullInstaller() {
+    installerPollGeneration += 1
+    let generation = installerPollGeneration
+    webVC?.showStatus("等待终端完成 Node.js 和 dsh 安装…")
+    pollForInstalledDsh(generation: generation, attempt: 0)
+  }
+
+  private func pollForInstalledDsh(generation: Int, attempt: Int) {
+    guard generation == installerPollGeneration else { return }
+    DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 5) { [weak self] in
+      guard let self else { return }
+      let installed = self.server.resolveDshBinary() != nil
+      DispatchQueue.main.async {
+        guard generation == self.installerPollGeneration else { return }
+        if installed {
+          AppLog.shared.info("install: full installer completed; dsh is now available")
+          self.prepareDshAndStartServer()
+        } else if attempt < 119 {
+          self.pollForInstalledDsh(generation: generation, attempt: attempt + 1)
+        } else {
+          self.presentFailure(
+            "等待完整安装程序超时。请检查终端中的错误信息后重试。",
+            retryPreparesDsh: true,
+            offersFullInstaller: true)
+        }
+      }
+    }
   }
 
   private func openLog() {

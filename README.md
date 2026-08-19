@@ -30,7 +30,9 @@
   - Cmd+Q 退出：优雅停止**它自己拉起**的服务（SIGTERM，7 秒兜底 SIGKILL）；复用的既有服务永不误杀。
 - **保活**：拉起的服务意外崩溃后 2 秒自动重启（60 秒内最多 3 次，超过弹窗报错）。
 - **单实例**：重复双击只聚焦已有窗口，不会起第二个服务。
-- **未安装 dsh**：弹原生对话框，可一键 `npm i -g @deepseek-ai/dsh`。
+- **未安装 dsh 自动处理**：启动时直接执行 `npm install -g @deepseek-ai/dsh`，无需确认；如果已通过
+  Homebrew、`nvm`、`fnm`、`asdf`、`volta`、`mise` 或自定义 npm prefix 安装，则自动识别并复用同一份全局 CLI；
+  如果连 npm 都没有，App 提供「运行完整安装程序」按钮，在终端补齐 Node.js/npm 和 dsh。
 - **与页面视觉贴合的标题栏**：无分割线、无标题文字的双色自绘条带——左侧取页面侧栏色、右侧取内容底色、
   中间画页面同款 1px 分界线，宽度实时跟随侧栏（折叠/拖拽），颜色与深浅主题随页面自动跟随
   （采样页面的 `--dsw-specific-sidebar-fill` / `--dsw-alias-bg-base` / `--dsw-alias-border-l1` 设计令牌，令牌缺失时回退系统样式）。
@@ -47,7 +49,7 @@
 
 - macOS 13+（Apple Silicon 与 Intel 均可）
 - Xcode 命令行工具（`swift`、`iconutil`）——仅构建时需要
-- DeepSeek Harness CLI：`npm i -g @deepseek-ai/dsh`（未安装时 App 会弹窗引导一键安装）
+- Node.js（含 npm）：推荐的一键安装脚本会在缺失时自动安装；只手动下载 App 时需要预先准备
 
 ### 快速开始
 
@@ -71,7 +73,10 @@ open -a "DeepSeek Harness"
 curl -fsSL https://github.com/wheam/deepseek-harness-mac-app/releases/download/latest/install.sh | sh
 ```
 
-脚本会下载最新的 `DeepSeek-Harness.zip`、校验代码签名、安装到 `/Applications`（无写权限时用 `~/Applications`）并打开。
+脚本会先检查 Node.js/npm 和 dsh：已有的直接复用；没有 npm 时优先用现有 Homebrew 安装 Node.js，
+否则下载并校验 Node.js 官方 LTS macOS 安装包（系统会请求一次管理员密码）。随后把 dsh 安装到 npm 的可写全局目录；
+如果系统全局目录不可写，则使用共享的用户级全局目录 `~/.local` 并写入终端 PATH。最后脚本下载最新的
+`DeepSeek-Harness.zip`、校验代码签名、安装到 `/Applications`（无写权限时用 `~/Applications`）并打开。
 因为不是浏览器下载，App 不带隔离（quarantine）属性，**首次打开不会有任何「无法验证开发者」警告**。
 
 **或手动下载：**
@@ -109,7 +114,7 @@ curl -fsSL https://github.com/wheam/deepseek-harness-mac-app/releases/download/l
 | `--log <path>` | 日志文件路径 |
 | `--shot-scrub` | 截图辅助：把页面全部文字替换为占位内容 |
 | `--shot-dark` | 截图辅助：把页面切到深色主题 |
-| `--no-auto-update` | 关闭启动自动更新检查（dsh CLI 与外壳） |
+| `--no-auto-update` | 关闭启动自动更新检查（dsh CLI 与外壳；缺失的 dsh 仍会自动安装） |
 
 ### 结构
 
@@ -119,6 +124,7 @@ Sources/DSHMac/
   main.swift                      入口
   LaunchOptions.swift             命令行参数
   AppLog.swift                    文件日志
+  ExecutableResolver.swift        GUI/终端 PATH、Node 版本管理器与用户 npm prefix 解析
   ServerController.swift          dsh 探测/拉起/就绪/保活/停止
   WebViewController.swift         WKWebView + 双色标题栏 + 主题同步
   AppDelegate.swift               窗口、菜单、单实例、安装流程
@@ -129,7 +135,7 @@ scripts/make-icon.swift           图标生成（白底黑鲸鱼）
 scripts/setup-signing.sh          安装固定自签名身份（含 Code Signing EKU 校验）
 scripts/signing.cnf               自签名证书 OpenSSL 配置（Code Signing EKU）
 build.sh                          构建并组装 .app（固定自签名身份，回退 ad-hoc）
-install.sh                        curl 一键安装脚本（下载、校验签名、安装并打开，无隔离属性）
+install.sh                        curl 一键安装脚本（补齐 Node/dsh、校验并安装 App）
 ```
 
 ### 设计决策（为什么这样做）
@@ -175,12 +181,15 @@ A native macOS app for the [DeepSeek Harness](https://github.com/deepseek-ai/dee
   - Cmd+Q quits the app and gracefully stops the server it spawned (SIGTERM, SIGKILL after 7s); an attached pre-existing server is never killed.
 - **Keep-alive**: a spawned server that crashes restarts after 2s (up to 3 times per 60s, then the app reports).
 - **Single instance**: launching again just focuses the existing window.
-- **One-click install**: when no `dsh` binary is found, the app offers `npm i -g @deepseek-ai/dsh` natively.
+- **Automatic dsh setup**: when no `dsh` binary is found, the app runs
+  `npm install -g @deepseek-ai/dsh` without a confirmation dialog. Existing Homebrew, `nvm`, `fnm`, `asdf`,
+  `volta`, `mise`, and custom npm-prefix installs are detected and reused as the one shared global CLI. If npm
+  itself is missing, the app offers a **Run Full Installer** action that bootstraps Node.js/npm and dsh in Terminal.
 - **Titlebar that continues the page layout**: a separator-free, title-less two-tone strip painted with the page's own design tokens — sidebar color over the sidebar width, content color over the rest, and the page's 1px column border between them. The split follows sidebar collapse/drag live and both colors follow the page's light/dark theme (falls back to the system look if the tokens disappear in a future dsh build).
 - **External links** (including `target="_blank"`) open in the default browser instead of replacing the shell page.
 - Menu bar: About / Quit, Edit (undo/clipboard), Reload (⌘R), Open in Browser (⇧⌘O), Window.
 - **Icon**: the black DeepSeek whale on a white tile — the path is the official dsh web favicon path, rendered at build time (`scripts/make-icon.swift`); a ready-made `resources/AppIcon.icns` is committed too.
-- **Auto-update on launch**: a globally installed dsh CLI upgrades to the registry's latest (before the server starts); the shell checks the rolling GitHub build, downloads and swaps in the newer bundle, and offers a restart (`--no-auto-update` disables both).
+- **Auto-update on launch**: the global dsh CLI upgrades to the registry's latest (before the server starts); the shell checks the rolling GitHub build, downloads and swaps in the newer bundle, and offers a restart (`--no-auto-update` disables updates, but a missing CLI is still installed).
 
 Logs: `~/Library/Logs/DeepSeekHarness/deepseek-harness.log`.
 
@@ -188,7 +197,7 @@ Logs: `~/Library/Logs/DeepSeekHarness/deepseek-harness.log`.
 
 - macOS 13+ (Apple Silicon and Intel)
 - Xcode Command Line Tools (`swift`, `iconutil`) — build time only
-- DeepSeek Harness CLI: `npm i -g @deepseek-ai/dsh` (the app guides a one-click install otherwise)
+- Node.js (including npm): the recommended one-line installer bootstraps it when missing; manual app downloads require it
 
 ### Quick start
 
@@ -212,7 +221,13 @@ Skip building entirely and grab the CI-built universal bundle (Apple Silicon + I
 curl -fsSL https://github.com/wheam/deepseek-harness-mac-app/releases/download/latest/install.sh | sh
 ```
 
-The script downloads the latest `DeepSeek-Harness.zip`, verifies the code signature, installs it into `/Applications` (or `~/Applications` if that isn't writable) and opens the app. Because it is not a browser download, the app carries no quarantine attribute and opens with **no "unidentified developer" warning at all**.
+The script first checks Node.js/npm and dsh, reusing existing installations. If npm is missing, it uses an existing
+Homebrew installation or downloads and verifies the official Node.js LTS macOS package (which requests administrator
+authorization once). It installs dsh into a writable npm global prefix, falling back to the shared user-global
+`~/.local` prefix and adding it to the shell PATH when the system prefix is not writable. It then downloads the latest
+`DeepSeek-Harness.zip`, verifies the code signature, installs it into `/Applications` (or `~/Applications` if needed),
+and opens the app. Because it is not a browser download, the app carries no quarantine attribute and opens with
+**no "unidentified developer" warning at all**.
 
 **Or download manually:**
 
@@ -252,7 +267,7 @@ Passed via `open -a "DeepSeek Harness" --args ...`:
 | `--log <path>` | log file path |
 | `--shot-scrub` | screenshot aid: replace all page text with placeholders |
 | `--shot-dark` | screenshot aid: switch the page to the dark theme |
-| `--no-auto-update` | disable the startup auto-update checks (dsh CLI and the shell) |
+| `--no-auto-update` | disable startup update checks (a missing dsh CLI is still installed) |
 
 ### Layout
 
@@ -262,6 +277,7 @@ Sources/DSHMac/
   main.swift                      entry point
   LaunchOptions.swift             command-line flags
   AppLog.swift                    file logging
+  ExecutableResolver.swift        GUI/shell PATH, Node version-manager, and user npm-prefix discovery
   ServerController.swift          dsh probe/spawn/readiness/keep-alive/stop
   WebViewController.swift         WKWebView + two-tone titlebar + theme sync
   AppDelegate.swift               window, menus, single instance, install flow
@@ -272,7 +288,7 @@ scripts/make-icon.swift           icon generator (black whale on white)
 scripts/setup-signing.sh          installs the fixed self-signed identity (Code Signing EKU verified)
 scripts/signing.cnf               OpenSSL config for the self-signed certificate (Code Signing EKU)
 build.sh                          builds and assembles the .app (fixed self-signed identity, ad-hoc fallback)
-install.sh                        one-line curl installer (downloads, verifies the signature, installs and opens, no quarantine)
+install.sh                        one-line curl installer (bootstraps Node/dsh, verifies and installs the app)
 ```
 
 ### Design decisions

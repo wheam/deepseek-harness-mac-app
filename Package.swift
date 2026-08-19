@@ -12,5 +12,10 @@ let package = Package(
       name: "DSHMac",
       path: "Sources/DSHMac"
     ),
+    .testTarget(
+      name: "DSHMacTests",
+      dependencies: ["DSHMac"],
+      path: "Tests/DSHMacTests"
+    ),
   ]
 )

@@ -21,7 +21,7 @@ env:
     curl -fsSL https://github.com/wheam/deepseek-harness-mac-app/releases/download/latest/install.sh | sh
     ```
 
-    The installer downloads `DeepSeek-Harness.zip`, verifies the code signature, installs into `/Applications` (or `~/Applications` if that isn't writable) and opens the app. Because it is not a browser download, the app carries no quarantine attribute — no warning, no extra steps.
+    The installer reuses an existing global `dsh`, or bootstraps Node.js/npm and installs one shared global CLI when needed. It then downloads `DeepSeek-Harness.zip`, verifies the code signature, installs into `/Applications` (or `~/Applications` if that isn't writable) and opens the app. Because it is not a browser download, the app carries no quarantine attribute — no warning, no extra steps.
 
     **Manual download:** this build is signed with a self-signed identity (no Apple Developer ID), so a browser download triggers Gatekeeper on first launch. To allow it:
 
@@ -36,6 +36,9 @@ jobs:
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
+
+      - name: Run tests
+        run: swift test
 
       - name: Set up signing identity
         env:

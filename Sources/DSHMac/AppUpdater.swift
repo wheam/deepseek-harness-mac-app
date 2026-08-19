@@ -1,11 +1,16 @@
 import AppKit
 
+enum DshPreparationResult {
+  case ready
+  case failed(String, offersFullInstaller: Bool)
+}
+
 /// Startup auto-updates.
 ///
-/// Two independent checks, both opt-out via `--no-auto-update`:
-/// - dsh CLI: when the resolved `dsh` is a global npm install, compare it
-///   with the registry's latest and run `npm install -g` before the server
-///   starts, so the spawned server already runs the new version.
+/// Two independent update checks, both opt-out via `--no-auto-update`:
+/// - dsh CLI: ensure a missing global CLI is installed even when updates are
+///   disabled. For global npm installs, compare with the registry and update
+///   before the server starts.
 /// - the shell itself: compare the GitHub rolling "latest" release's publish
 ///   time with this build's stamp (or the last applied update) and, when
 ///   newer, download, unzip, de-quarantine, and swap the bundle in place,
@@ -17,6 +22,15 @@ final class AppUpdater {
   private static let buildDateKey = "DSHBuildDate"
   /// UserDefaults key remembering the newest release already applied.
   private static let appliedDateKey = "DSHLastAppliedShellUpdate"
+  /// Build one npm global-install command for both first install and updates.
+  /// `prefix` pins an update to the existing CLI's global prefix (including
+  /// the shared user-global `~/.local` prefix used by install.sh).
+  static func globalDshInstallArguments(prefix: String? = nil) -> [String] {
+    var arguments = ["install", "-g"]
+    if let prefix { arguments += ["--prefix", prefix] }
+    arguments += ["@deepseek-ai/dsh@latest", "--no-audit", "--no-fund"]
+    return arguments
+  }
 
   private let server: ServerController
   private let enabled: Bool
@@ -28,55 +42,97 @@ final class AppUpdater {
 
   // MARK: - dsh CLI
 
-  /// Check and install a newer global `dsh` CLI, then continue. Runs the
-  /// install on a background queue; `onStatus` reports overlay text.
-  /// @param completion - called on the main thread when the check (and any
-  /// install) settles; the server may then start.
-  func updateDshCliIfNeeded(onStatus: @escaping (String) -> Void, completion: @escaping () -> Void) {
-    guard enabled else {
-      AppLog.shared.info("updater: disabled; skipping CLI update check")
-      completion()
-      return
-    }
-    guard let dshPath = server.resolveDshBinary() else {
-      AppLog.shared.info("updater: no dsh binary resolved; skipping CLI update")
-      completion()
-      return
-    }
-    // The resolver may return the npm bin symlink; the global-install check
-    // keys on the real node_modules path.
-    let realPath = (dshPath as NSString).resolvingSymlinksInPath
-    guard Self.isGlobalInstall(realPath) else {
-      AppLog.shared.info("updater: dsh is not a global npm install; skipping CLI update")
-      completion()
-      return
-    }
-    DispatchQueue.global().async {
-      let latest = Self.npmLatestVersion()
-      let installed = Self.installedGlobalVersion()
-      DispatchQueue.main.async {
-        guard let latest, let installed, latest != installed else {
-          AppLog.shared.info("updater: dsh CLI \(installed ?? "?") is current (latest \(latest ?? "?"))")
-          completion()
+  /// Ensure dsh exists without asking the user, then optionally update it.
+  /// A missing CLI is installed into the resolved npm's global prefix so the
+  /// app and the user's terminal share one executable. All npm/network work
+  /// stays off the main queue.
+  func prepareDshCli(
+    onStatus: @escaping (String) -> Void,
+    completion: @escaping (DshPreparationResult) -> Void
+  ) {
+    DispatchQueue.global(qos: .userInitiated).async {
+      guard let existingPath = self.server.resolveDshBinary() else {
+        AppLog.shared.info("updater: no dsh binary resolved; installing global CLI")
+        DispatchQueue.main.async {
+          onStatus("首次使用，正在自动安装 DeepSeek Harness CLI…")
+        }
+        guard let npm = Self.resolveNpm(near: nil) else {
+          AppLog.shared.error("updater: cannot auto-install dsh because npm was not found")
+          self.finish(.failed(
+            "未找到 Node.js/npm。请运行完整安装程序，它会先安装 Node.js，再安装全局 dsh。",
+            offersFullInstaller: true), completion)
           return
         }
-        AppLog.shared.info("updater: dsh CLI \(installed) -> \(latest); installing")
-        onStatus("正在更新 DeepSeek Harness CLI（\(installed) → \(latest)）…")
-        Self.runNpmInstall { success in
-          if success {
-            AppLog.shared.info("updater: dsh CLI updated to \(latest)")
-          } else {
-            AppLog.shared.error("updater: dsh CLI update failed; continuing with the installed version")
-          }
-          completion()
+        let result = Self.runNpmInstall(using: npm, prefix: nil)
+        guard result.exit == 0 else {
+          let detail = result.output.trimmingCharacters(in: .whitespacesAndNewlines)
+          let suffix = detail.isEmpty ? "请确认已安装 Node.js（含 npm）并检查网络连接。" : String(detail.suffix(1000))
+          self.finish(.failed(
+            "自动安装 dsh 失败（退出码 \(result.exit)）。\n\n\(suffix)",
+            offersFullInstaller: true), completion)
+          return
         }
+        guard let installedPath = self.server.resolveDshBinary() else {
+          self.finish(.failed(
+            "dsh 安装命令已完成，但 App 未找到安装结果。请查看日志。",
+            offersFullInstaller: true), completion)
+          return
+        }
+        AppLog.shared.info("updater: global dsh installed: \(installedPath)")
+        self.finish(.ready, completion)
+        return
       }
+
+      guard self.enabled else {
+        AppLog.shared.info("updater: disabled; skipping CLI update check")
+        self.finish(.ready, completion)
+        return
+      }
+
+      guard let existingPrefix = Self.globalNpmPrefix(forDshPath: existingPath) else {
+        AppLog.shared.info("updater: dsh is not a global npm install; skipping CLI update")
+        self.finish(.ready, completion)
+        return
+      }
+
+      guard let npm = Self.resolveNpm(near: existingPath) else {
+        AppLog.shared.info("updater: npm not resolved; keeping installed dsh")
+        self.finish(.ready, completion)
+        return
+      }
+      let latest = Self.npmLatestVersion(using: npm)
+      let installed = Self.installedVersion(forDshPath: existingPath)
+      guard let latest, let installed, latest != installed else {
+        AppLog.shared.info("updater: dsh CLI \(installed ?? "?") is current (latest \(latest ?? "?"))")
+        self.finish(.ready, completion)
+        return
+      }
+
+      AppLog.shared.info("updater: dsh CLI \(installed) -> \(latest); installing")
+      DispatchQueue.main.async {
+        onStatus("正在更新 DeepSeek Harness CLI（\(installed) → \(latest)）…")
+      }
+      let update = Self.runNpmInstall(using: npm, prefix: existingPrefix)
+      if update.exit == 0 {
+        AppLog.shared.info("updater: dsh CLI updated to \(latest)")
+      } else {
+        // An update failure must not prevent an already-installed CLI from
+        // starting; the complete npm output remains in the app log.
+        AppLog.shared.error("updater: dsh CLI update failed; continuing with the installed version")
+      }
+      self.finish(.ready, completion)
     }
   }
 
+  private func finish(
+    _ result: DshPreparationResult,
+    _ completion: @escaping (DshPreparationResult) -> Void
+  ) {
+    DispatchQueue.main.async { completion(result) }
+  }
+
   /// The registry's latest `@deepseek-ai/dsh` version, or nil.
-  private static func npmLatestVersion() -> String? {
-    guard let npm = resolveNpm() else { return nil }
+  private static func npmLatestVersion(using npm: String) -> String? {
     let result = runProcess(executable: npm, arguments: ["view", "@deepseek-ai/dsh", "version"],
       timeout: 20, description: "npm view")
     guard result.exit == 0 else { return nil }
@@ -84,36 +140,46 @@ final class AppUpdater {
     return version.isEmpty ? nil : version
   }
 
-  /// The globally installed version from npm's global prefix, or nil.
-  private static func installedGlobalVersion() -> String? {
-    for prefix in ["/opt/homebrew/lib/node_modules", "/usr/local/lib/node_modules"] {
-      let manifest = prefix + "/@deepseek-ai/dsh/package.json"
+  /// Read the package manifest by walking up from the resolved dsh symlink.
+  /// This works for Homebrew, nvm/fnm/asdf, and custom global prefixes.
+  private static func installedVersion(forDshPath path: String) -> String? {
+    var directory = ((path as NSString).resolvingSymlinksInPath as NSString)
+      .deletingLastPathComponent
+    for _ in 0..<6 {
+      let manifest = (directory as NSString).appendingPathComponent("package.json")
       if let data = try? Data(contentsOf: URL(fileURLWithPath: manifest)),
         let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+        json["name"] as? String == "@deepseek-ai/dsh",
         let version = json["version"] as? String {
         return version
       }
+      let parent = (directory as NSString).deletingLastPathComponent
+      if parent == directory { break }
+      directory = parent
     }
     return nil
   }
 
-  private static func runNpmInstall(completion: @escaping (Bool) -> Void) {
-    guard let npm = resolveNpm() else {
-      completion(false)
-      return
-    }
-    let result = runProcess(executable: npm, arguments: ["install", "-g", "@deepseek-ai/dsh"],
-      timeout: 300, description: "npm install -g @deepseek-ai/dsh")
-    completion(result.exit == 0)
+  private static func runNpmInstall(
+    using npm: String,
+    prefix: String?
+  ) -> (exit: Int32, output: String) {
+    runProcess(
+      executable: npm,
+      arguments: globalDshInstallArguments(prefix: prefix),
+      timeout: 300,
+      description: "npm install -g @deepseek-ai/dsh")
   }
 
-  private static func resolveNpm() -> String? {
-    ["/opt/homebrew/bin/npm", "/usr/local/bin/npm"]
-      .first(where: { FileManager.default.isExecutableFile(atPath: $0) })
+  private static func resolveNpm(near dshPath: String?) -> String? {
+    let directories = dshPath.map { [($0 as NSString).deletingLastPathComponent] } ?? []
+    return ExecutableResolver.resolve("npm", additionalDirectories: directories)
   }
 
-  private static func isGlobalInstall(_ path: String) -> Bool {
-    path.contains("/lib/node_modules/")
+  static func globalNpmPrefix(forDshPath path: String) -> String? {
+    let realPath = (path as NSString).resolvingSymlinksInPath
+    guard let marker = realPath.range(of: "/lib/node_modules/") else { return nil }
+    return String(realPath[..<marker.lowerBound])
   }
 
   // MARK: - Shell self-update
@@ -296,19 +362,21 @@ final class AppUpdater {
     let process = Process()
     process.executableURL = URL(fileURLWithPath: executable)
     process.arguments = arguments
-    // GUI apps get a minimal PATH from launchd; npm needs node on it.
-    var environment = ProcessInfo.processInfo.environment
-    let inheritedPath = environment["PATH"] ?? "/usr/bin:/bin:/usr/sbin:/sbin"
-    environment["PATH"] = "/opt/homebrew/bin:/usr/local/bin:" + inheritedPath
-    process.environment = environment
+    // npm is commonly a shim whose shebang needs a sibling `node`. Put both
+    // resolved locations ahead of Finder/launchd's minimal PATH.
+    let executableDirectory = (executable as NSString).deletingLastPathComponent
+    let nodePath = ExecutableResolver.resolve("node", additionalDirectories: [executableDirectory])
+    process.environment = ExecutableResolver.processEnvironment(
+      executablePaths: [executable, nodePath].compactMap { $0 })
     let pipe = Pipe()
     process.standardOutput = pipe
     process.standardError = pipe
     var output = Data()
+    let outputQueue = DispatchQueue(label: "com.deepseek-ai.harness.npm-output")
     pipe.fileHandleForReading.readabilityHandler = { handle in
       let data = handle.availableData
       guard !data.isEmpty else { return }
-      output.append(data)
+      outputQueue.sync { output.append(data) }
     }
     let watchdog = DispatchWorkItem {
       if process.isRunning {
@@ -327,7 +395,8 @@ final class AppUpdater {
     process.waitUntilExit()
     watchdog.cancel()
     pipe.fileHandleForReading.readabilityHandler = nil
-    let text = String(data: output, encoding: .utf8) ?? ""
+    let captured = outputQueue.sync { output }
+    let text = String(data: captured, encoding: .utf8) ?? ""
     if !text.isEmpty {
       AppLog.shared.info("updater: \(description): \(text.trimmingCharacters(in: .whitespacesAndNewlines).prefix(200))")
     }

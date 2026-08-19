@@ -45,6 +45,7 @@ final class ServerController {
   private var stderrBuffer = Data()
   private let ioQueue = DispatchQueue(label: "com.deepseek-ai.harness.server-io")
   private var logTail: [String] = []
+  private var cachedDshPath: String?
 
   init(options: LaunchOptions) {
     self.options = options
@@ -122,14 +123,14 @@ final class ServerController {
       process.executableURL = URL(fileURLWithPath: "/bin/zsh")
       let shellQuote: (String) -> String = { "'" + $0.replacingOccurrences(of: "'", with: "'\\''") + "'" }
       let command = ([dshPath] + args).map(shellQuote).joined(separator: " ")
-      process.arguments = ["-lc", "exec \(command)"]
+      process.arguments = ["-lic", "exec \(command)"]
     }
     process.currentDirectoryURL = URL(fileURLWithPath: options.cwd ?? NSHomeDirectory())
 
-    var environment = ProcessInfo.processInfo.environment
-    let inheritedPath = environment["PATH"] ?? "/usr/bin:/bin:/usr/sbin:/sbin"
-    environment["PATH"] = "/opt/homebrew/bin:/usr/local/bin:" + inheritedPath
-    process.environment = environment
+    let dshDirectory = (dshPath as NSString).deletingLastPathComponent
+    let nodePath = ExecutableResolver.resolve("node", additionalDirectories: [dshDirectory])
+    process.environment = ExecutableResolver.processEnvironment(
+      executablePaths: [dshPath, nodePath].compactMap { $0 })
 
     let stdoutPipe = Pipe()
     let stderrPipe = Pipe()
@@ -313,27 +314,33 @@ final class ServerController {
     }.resume()
   }
 
-  /// Locate a runnable `dsh` binary: explicit path, then PATH and known
-  /// prefixes, then npm npx checkouts (newest @deepseek-ai/dsh first).
+  /// Locate a runnable `dsh` binary: explicit path, GUI/login-shell PATH,
+  /// common Node version managers, then npm npx checkouts (newest
+  /// @deepseek-ai/dsh first).
   func resolveDshBinary() -> String? {
     let fm = FileManager.default
-    if let overridePath = options.dshPath, fm.isExecutableFile(atPath: overridePath) {
-      return overridePath
+    if let cachedDshPath, fm.isExecutableFile(atPath: cachedDshPath) { return cachedDshPath }
+
+    if let path = ExecutableResolver.resolve("dsh", explicitPath: options.dshPath) {
+      cachedDshPath = path
+      AppLog.shared.info("server: dsh binary resolved: \(path)")
+      return path
     }
-    var candidates: [(path: String, rank: Int)] = []
-    var searchDirs = ["/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"]
-    searchDirs += (ProcessInfo.processInfo.environment["PATH"] ?? "")
-      .split(separator: ":").map(String.init)
-    for dir in searchDirs {
-      let path = (dir as NSString).appendingPathComponent("dsh")
-      if fm.isExecutableFile(atPath: path) {
-        // A PATH/known-prefix hit (a real install) always beats npx caches:
-        // return it immediately, since cache rankings can otherwise outrank
-        // it and resurrect a stale frozen version.
-        AppLog.shared.info("server: dsh binary resolved: \(path)")
+
+    // npm and dsh are siblings for global installs. This fallback covers a
+    // custom npm prefix even if only npm itself was discoverable.
+    if let npmPath = ExecutableResolver.resolve("npm") {
+      let npmDirectory = (npmPath as NSString).deletingLastPathComponent
+      if let path = ExecutableResolver.resolve(
+        "dsh", additionalDirectories: [npmDirectory])
+      {
+        cachedDshPath = path
+        AppLog.shared.info("server: dsh binary resolved beside npm: \(path)")
         return path
       }
     }
+
+    var candidates: [(path: String, rank: Int)] = []
     let npxRoot = (NSHomeDirectory() as NSString).appendingPathComponent(".npm/_npx")
     if let checkouts = try? fm.contentsOfDirectory(atPath: npxRoot) {
       for checkout in checkouts {
@@ -354,6 +361,7 @@ final class ServerController {
       }
     }
     guard let best = candidates.max(by: { $0.rank < $1.rank }) else { return nil }
+    cachedDshPath = best.path
     AppLog.shared.info("server: dsh binary resolved: \(best.path)")
     return best.path
   }
