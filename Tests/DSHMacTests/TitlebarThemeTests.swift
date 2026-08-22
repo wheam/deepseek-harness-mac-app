@@ -65,6 +65,42 @@ final class TitlebarThemeTests: XCTestCase {
     XCTAssertNil(PageRGBAColor(jsonValue: [0, 0, 0]))
   }
 
+  func testTranslucentBlackOverlayDoesNotClaimThePageIsDark() throws {
+    let theme = try XCTUnwrap(PageTitlebarTheme(json: try payload("""
+      {
+        "ok": true,
+        "sidebarRGBA": [249, 250, 251, 255],
+        "contentRGBA": [0, 0, 0, 61],
+        "sidebarWidth": 280,
+        "dark": true
+      }
+      """)))
+
+    XCTAssertFalse(theme.dark)
+  }
+
+  func testTrafficLightStylingDoesNotOverrideTheWindowAppearance() throws {
+    let window = NSWindow(
+      contentRect: NSRect(x: 0, y: 0, width: 320, height: 200),
+      styleMask: [.titled, .closable, .miniaturizable, .resizable],
+      backing: .buffered,
+      defer: false)
+    window.appearance = nil
+
+    TitlebarTrafficLightStyler.apply(dark: true, to: window)
+
+    XCTAssertNil(window.appearance)
+    for buttonType in [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton] {
+      let appearance = try XCTUnwrap(window.standardWindowButton(buttonType)?.appearance)
+      XCTAssertEqual(appearance.name, .darkAqua)
+    }
+
+    TitlebarTrafficLightStyler.reset(in: window)
+    for buttonType in [NSWindow.ButtonType.closeButton, .miniaturizeButton, .zoomButton] {
+      XCTAssertNil(window.standardWindowButton(buttonType)?.appearance)
+    }
+  }
+
   func testTransientFailuresRetainStateUntilThirdConsecutiveFailure() {
     var guardState = TitlebarThemeSampleGuard()
 

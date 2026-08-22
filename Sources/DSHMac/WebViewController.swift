@@ -26,6 +26,21 @@ struct PageRGBAColor: Equatable {
     NSColor(calibratedRed: red / 255, green: green / 255,
       blue: blue / 255, alpha: alpha / 255)
   }
+
+  /// A partially transparent surface is flattened over white as a defensive
+  /// fallback. The page bridge normally sends an already composited opaque
+  /// color, but transient black overlays must never be mistaken for a dark
+  /// page and then fed back into WKWebView's `prefers-color-scheme`.
+  var isVisuallyDark: Bool {
+    let opacity = alpha / 255
+    let flattenedRed = red * opacity + 255 * (1 - opacity)
+    let flattenedGreen = green * opacity + 255 * (1 - opacity)
+    let flattenedBlue = blue * opacity + 255 * (1 - opacity)
+    let luminance = (
+      0.2126 * flattenedRed + 0.7152 * flattenedGreen + 0.0722 * flattenedBlue
+    ) / 255
+    return luminance < 0.45
+  }
 }
 
 /// Validated native half of the page-to-titlebar protocol.
@@ -46,7 +61,32 @@ struct PageTitlebarTheme: Equatable {
     self.content = content
     border = PageRGBAColor(jsonValue: json["borderRGBA"])
     sidebarWidth = width
-    dark = json["dark"] as? Bool ?? false
+    // Derive this at the validated native boundary instead of trusting a page
+    // boolean that may have been computed from an uncomposited overlay.
+    dark = content.isVisuallyDark
+  }
+}
+
+/// The page may be explicitly dark while macOS is light (or vice versa). Only
+/// the traffic-light controls need page-aware contrast. Changing the entire
+/// window appearance would also change WKWebView's `prefers-color-scheme` and
+/// create a self-reinforcing theme loop when the page follows the system.
+enum TitlebarTrafficLightStyler {
+  private static let buttonTypes: [NSWindow.ButtonType] = [
+    .closeButton, .miniaturizeButton, .zoomButton,
+  ]
+
+  static func apply(dark: Bool, to window: NSWindow) {
+    let appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
+    for buttonType in buttonTypes {
+      window.standardWindowButton(buttonType)?.appearance = appearance
+    }
+  }
+
+  static func reset(in window: NSWindow) {
+    for buttonType in buttonTypes {
+      window.standardWindowButton(buttonType)?.appearance = nil
+    }
   }
 }
 
@@ -318,16 +358,36 @@ final class WebViewController: NSViewController, WKNavigationDelegate, WKUIDeleg
           && a.every(function (part, index) { return part === b[index]; });
       };
 
-      const renderedBackground = function (start, body) {
+      const compositeOver = function (foreground, background) {
+        const foregroundAlpha = foreground[3] / 255;
+        const backgroundAlpha = background[3] / 255;
+        const alpha = foregroundAlpha + backgroundAlpha * (1 - foregroundAlpha);
+        if (alpha <= 0) return [0, 0, 0, 0];
+        const component = function (index) {
+          return Math.round((foreground[index] * foregroundAlpha
+            + background[index] * backgroundAlpha * (1 - foregroundAlpha)) / alpha);
+        };
+        return [component(0), component(1), component(2), Math.round(alpha * 255)];
+      };
+
+      // Compose every translucent DOM layer over the page design token. A
+      // first-nontransparent lookup can see a temporary black overlay at 24%
+      // opacity and falsely classify an otherwise white page as dark.
+      const renderedBackground = function (start, body, fallback) {
+        const layers = [];
         let el = start;
         while (el) {
           let color = null;
           try { color = rgba(getComputedStyle(el).backgroundColor, body); } catch (e) {}
-          if (color && color[3] > 0) return color;
-          if (el === body) break;
+          if (color && color[3] > 0) layers.push(color);
+          if (el === document.documentElement) break;
           el = el.parentElement;
         }
-        return null;
+        let result = fallback && fallback[3] > 0 ? fallback : [255, 255, 255, 255];
+        for (let index = layers.length - 1; index >= 0; index -= 1) {
+          result = compositeOver(layers[index], result);
+        }
+        return result;
       };
 
       const build = function () {
@@ -365,23 +425,22 @@ final class WebViewController: NSViewController, WKNavigationDelegate, WKUIDeleg
           let borderRGBA = null;
           if (sidebarElement) {
             const sidebarStyle = getComputedStyle(sidebarElement);
-            sidebarRGBA = rgba(sidebarStyle.backgroundColor, body);
+            sidebarRGBA = renderedBackground(sidebarElement, body, tokenSidebar);
             borderRGBA = rgba(sidebarStyle.borderRightColor, body);
           }
           if (!sidebarRGBA || sidebarRGBA[3] === 0) {
-            sidebarRGBA = renderedBackground(hit, body) || tokenSidebar;
+            sidebarRGBA = renderedBackground(hit, body, tokenSidebar);
           }
           if (!borderRGBA || borderRGBA[3] === 0) borderRGBA = tokenBorder;
 
           const contentX = Math.min(Math.max(sidebarWidth + 10, pointX), Math.max(pointX, window.innerWidth - 1));
           const contentHit = document.elementFromPoint(contentX, pointY);
-          const contentRGBA = renderedBackground(contentHit, body) || tokenContent;
+          const contentRGBA = renderedBackground(contentHit, body, tokenContent);
           if (!sidebarRGBA) return { ok: false, reason: 'sidebar-color-unavailable' };
           if (!contentRGBA) return { ok: false, reason: 'content-color-unavailable' };
           if (!(sidebarWidth > 0)) return { ok: false, reason: 'sidebar-geometry-unavailable' };
 
-          // Traffic-light contrast should follow the rendered surface even if
-          // the page changes the attribute it uses to represent dark mode.
+          // This hint is also recomputed at the validated native boundary.
           const luminance = (0.2126 * contentRGBA[0] + 0.7152 * contentRGBA[1] + 0.0722 * contentRGBA[2]) / 255;
           return { ok: true, sidebarRGBA, contentRGBA, borderRGBA,
             sidebarWidth, dark: luminance < 0.45 };
@@ -881,8 +940,9 @@ final class WebViewController: NSViewController, WKNavigationDelegate, WKUIDeleg
 
   /// Paint the strip two-tone: sidebar color over the sidebar width, content
   /// color over the rest, with the page's own 1px column border between them.
-  /// The window appearance follows the page theme so the title text and
-  /// traffic lights keep contrast in both light and dark pages.
+  /// Only the traffic lights follow the page theme. The window itself keeps
+  /// the real macOS appearance so WKWebView's system-theme media query cannot
+  /// be changed by its own sampled page colors.
   private func applyPageTheme(_ theme: PageTitlebarTheme) {
     guard let window = view.window else {
       AppLog.shared.info("webview: theme payload before window attach; skipped")
@@ -899,12 +959,7 @@ final class WebViewController: NSViewController, WKNavigationDelegate, WKUIDeleg
     stripBorder.layer?.backgroundColor = (theme.border?.nsColor ?? NSColor.separatorColor).cgColor
     stripBorder.isHidden = false
     window.backgroundColor = theme.content.nsColor
-    // Screenshot dark mode keeps the window appearance as-is: flipping the
-    // appearance (or starting dark) leaves this WKWebView rendering a blank
-    // surface, while the page's own attribute-driven dark theme renders fine.
-    if !shotDark {
-      window.appearance = NSAppearance(named: theme.dark ? .darkAqua : .aqua)
-    }
+    TitlebarTrafficLightStyler.apply(dark: theme.dark, to: window)
     AppLog.shared.info("webview: theme synced (dark=\(theme.dark), sidebarRGBA=\(theme.sidebar), contentRGBA=\(theme.content), width=\(theme.sidebarWidth))")
     if widthChanged { view.needsLayout = true }
   }
@@ -925,7 +980,7 @@ final class WebViewController: NSViewController, WKNavigationDelegate, WKUIDeleg
     stripBorder.isHidden = true
     sidebarWidth = 0
     window.backgroundColor = .windowBackgroundColor
-    window.appearance = nil
+    TitlebarTrafficLightStyler.reset(in: window)
     AppLog.shared.info("webview: titlebar sampling failed repeatedly; using system window strip")
     view.needsLayout = true
   }
