@@ -393,6 +393,9 @@ final class WebViewController: NSViewController, WKNavigationDelegate, WKUIDeleg
       const build = function () {
         const body = document.body;
         if (!body) return { ok: false, reason: 'body-not-ready' };
+        if (document.querySelector('[data-dsh-mac-settings-dialog]')) {
+          return { ok: false, reason: 'settings-modal-open' };
+        }
         try {
           const style = getComputedStyle(body);
           const tokenSidebar = rgba(style.getPropertyValue('--dsw-specific-sidebar-fill').trim(), body);
@@ -450,6 +453,10 @@ final class WebViewController: NSViewController, WKNavigationDelegate, WKUIDeleg
       };
       const post = function () {
         const result = build();
+        // Keep the last valid titlebar colors while the web modal dims the
+        // page. Its mask does not cover the native title strip, so sampling it
+        // would produce a mismatched half-dimmed titlebar.
+        if (!result.ok && result.reason === 'settings-modal-open') return;
         const p = JSON.stringify(result);
         const now = Date.now();
         if (p === lastPayload && (result.ok || now - lastInvalidPost < 2500)) return;
@@ -490,6 +497,7 @@ final class WebViewController: NSViewController, WKNavigationDelegate, WKUIDeleg
     let userContent = WKUserContentController()
     userContent.add(proxy, name: Self.themeMessageName)
     userContent.add(contextProxy, name: Self.contextMenuMessageName)
+    userContent.addUserScript(SettingsPresentation.script)
     userContent.addUserScript(Self.themeScript)
     userContent.addUserScript(Self.contextMenuScript)
     configuration.userContentController = userContent
