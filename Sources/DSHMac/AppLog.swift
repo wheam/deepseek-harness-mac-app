@@ -10,7 +10,7 @@ final class AppLog {
   static let shared = AppLog()
 
   private var handle: FileHandle?
-  private let queue = DispatchQueue(label: "com.deepseek-ai.harness.log")
+  private let queue = DispatchQueue(label: "io.github.wheam.deepseek-harness.log")
   private let formatter = DateFormatter()
 
   private init() {

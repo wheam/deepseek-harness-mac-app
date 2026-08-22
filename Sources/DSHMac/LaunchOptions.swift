@@ -84,6 +84,10 @@ struct LaunchOptions: CustomStringConvertible {
       --dsh <path>   explicit dsh binary path
       --direct       run dsh directly instead of via the login shell
       --log <path>   log file path
+      --shot-scrub   replace page text with screenshot placeholders
+      --shot-dark    force the screenshot page theme to dark
+      --no-auto-update
+                     disable CLI and app-shell update checks
       --help         this help
     """
 }

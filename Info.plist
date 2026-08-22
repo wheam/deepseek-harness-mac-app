@@ -7,7 +7,7 @@
 	<key>CFBundleExecutable</key>
 	<string>DeepSeekHarness</string>
 	<key>CFBundleIdentifier</key>
-	<string>com.deepseek-ai.harness</string>
+	<string>io.github.wheam.deepseek-harness</string>
 	<key>CFBundleInfoDictionaryVersion</key>
 	<string>6.0</string>
 	<key>CFBundleName</key>
@@ -35,6 +35,8 @@
 	<key>CFBundleIconFile</key>
 	<string>AppIcon</string>
 	<key>DSHBuildDate</key>
+	<string></string>
+	<key>DSHBuildCommit</key>
 	<string></string>
 </dict>
 </plist>

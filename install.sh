@@ -6,14 +6,18 @@
 #   sh install.sh [--no-open] [--dest <dir>]
 #
 # 原理：浏览器下载的 App 会被打上隔离（quarantine）属性，Gatekeeper 因此拦截；
-# 本脚本用 curl 下载、校验代码签名后安装到 /Applications（无写权限时用
-# ~/Applications），App 不带隔离属性，首次打开不会出现「无法验证开发者」警告。
+# 本脚本用 curl 下载并核对 SHA256、Bundle ID、代码签名与固定发布证书后
+# 安装到 /Applications（无写权限时用 ~/Applications）；App 不带隔离属性，
+# 首次打开不会出现「无法验证开发者」警告。
 set -e
 
 REPO="wheam/deepseek-harness-mac-app"
-BASE_URL="https://github.com/$REPO/releases/download/latest"
+BASE_URL="${DSH_RELEASE_BASE_URL:-https://github.com/$REPO/releases/download/latest}"
 ZIP_NAME="DeepSeek-Harness.zip"
+ZIP_SHA_NAME="DeepSeek-Harness.zip.sha256"
 APP_NAME="DeepSeek Harness"
+EXPECTED_BUNDLE_ID="io.github.wheam.deepseek-harness"
+TRUSTED_CERT_SHA256="b27ec2f2110df554e415d0142ea13ab504f359db1698398b61ef702a4f6f481b"
 NODE_INDEX_URL="https://nodejs.org/dist/index.json"
 NODE_DIST_URL="https://nodejs.org/dist"
 USER_NPM_PREFIX="$HOME/.local"
@@ -160,16 +164,56 @@ ensure_global_dsh() {
   echo "==> dsh 已就绪: $(command -v dsh) ($(dsh --version))"
 }
 
+verify_app_bundle() {
+  app_path="$1"
+  /usr/bin/codesign --verify --deep --strict "$app_path" || {
+    echo "error: App 代码签名无效。" >&2
+    exit 1
+  }
+  actual_bundle_id="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' \
+    "$app_path/Contents/Info.plist" 2>/dev/null || true)"
+  [ "$actual_bundle_id" = "$EXPECTED_BUNDLE_ID" ] || {
+    echo "error: App Bundle ID 不可信: $actual_bundle_id" >&2
+    exit 1
+  }
+
+  cert_dir="$TMP/app-signing-certificate"
+  rm -rf "$cert_dir"
+  mkdir -p "$cert_dir"
+  (cd "$cert_dir" && /usr/bin/codesign -d --extract-certificates "$app_path") \
+    >/dev/null 2>&1 || {
+      echo "error: 无法提取 App 签名证书。" >&2
+      exit 1
+    }
+  [ -f "$cert_dir/codesign0" ] || {
+    echo "error: App 没有签名证书。" >&2
+    exit 1
+  }
+  actual_cert_sha="$(/usr/bin/shasum -a 256 "$cert_dir/codesign0" | /usr/bin/awk '{print $1}')"
+  [ "$actual_cert_sha" = "$TRUSTED_CERT_SHA256" ] || {
+    echo "error: App 签名证书不可信（SHA256 $actual_cert_sha）。" >&2
+    exit 1
+  }
+}
+
 ensure_global_dsh
 
 echo "==> 下载 $ZIP_NAME …"
 "$CURL" -fL --retry 3 -o "$TMP/$ZIP_NAME" "$BASE_URL/$ZIP_NAME"
+"$CURL" -fL --retry 3 -o "$TMP/$ZIP_SHA_NAME" "$BASE_URL/$ZIP_SHA_NAME"
+expected_zip_sha="$(/usr/bin/awk -v file="$ZIP_NAME" '$2 == file { print $1; exit }' \
+  "$TMP/$ZIP_SHA_NAME")"
+actual_zip_sha="$(/usr/bin/shasum -a 256 "$TMP/$ZIP_NAME" | /usr/bin/awk '{print $1}')"
+[ -n "$expected_zip_sha" ] && [ "$actual_zip_sha" = "$expected_zip_sha" ] || {
+  echo "error: $ZIP_NAME SHA256 校验失败。" >&2
+  exit 1
+}
 
-echo "==> 解压并校验代码签名 …"
+echo "==> 解压并校验发布者签名 …"
 ditto -x -k "$TMP/$ZIP_NAME" "$TMP/unzipped"
 APP_SRC="$TMP/unzipped/$APP_NAME.app"
 [ -d "$APP_SRC" ] || { echo "error: 压缩包里没有找到 $APP_NAME.app" >&2; exit 1; }
-codesign --verify --deep --strict "$APP_SRC"
+verify_app_bundle "$APP_SRC"
 
 if pgrep -x DeepSeekHarness >/dev/null 2>&1; then
   echo "==> 注意: App 正在运行，磁盘上的副本会被替换，下次启动生效。"
@@ -179,7 +223,7 @@ echo "==> 安装到 $DEST …"
 rm -rf "$DEST/$APP_NAME.app"
 ditto "$APP_SRC" "$DEST/$APP_NAME.app"
 xattr -dr com.apple.quarantine "$DEST/$APP_NAME.app" 2>/dev/null || true
-codesign --verify --deep --strict "$DEST/$APP_NAME.app"
+verify_app_bundle "$DEST/$APP_NAME.app"
 
 VERSION="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$DEST/$APP_NAME.app/Contents/Info.plist" 2>/dev/null || echo '?')"
 BUILD_DATE="$(/usr/libexec/PlistBuddy -c 'Print :DSHBuildDate' "$DEST/$APP_NAME.app/Contents/Info.plist" 2>/dev/null || echo '?')"

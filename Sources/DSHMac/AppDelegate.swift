@@ -6,7 +6,8 @@ import AppKit
 /// macOS conventions: closing the window (Cmd+W) keeps the app and its
 /// server alive in the Dock; Cmd+Q quits the app and gracefully stops the
 /// server this app spawned (an attached pre-existing server is never touched).
-final class AppDelegate: NSObject, NSApplicationDelegate, ServerControllerDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, ServerControllerDelegate,
+  NSMenuItemValidation {
   private let options: LaunchOptions
   private let logPath: String
   private let server: ServerController
@@ -41,7 +42,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ServerControllerDelega
       exit(0)
     }
     distributedObserver = DistributedNotificationCenter.default().addObserver(
-      forName: NSNotification.Name("DSHHarnessShowWindow"), object: nil, queue: .main
+      forName: NSNotification.Name("io.github.wheam.deepseek-harness.show-window"),
+      object: nil,
+      queue: .main
     ) { [weak self] _ in
       AppLog.shared.info("app: received show-window request from another instance")
       self?.showMainWindow()
@@ -178,7 +181,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ServerControllerDelega
     guard !others.isEmpty else { return false }
     AppLog.shared.info("app: another instance is running; asking it to show its window")
     DistributedNotificationCenter.default().postNotificationName(
-      NSNotification.Name("DSHHarnessShowWindow"), object: nil, userInfo: nil,
+      NSNotification.Name("io.github.wheam.deepseek-harness.show-window"),
+      object: nil,
+      userInfo: nil,
       deliverImmediately: true)
     return true
   }
@@ -326,64 +331,65 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ServerControllerDelega
   // MARK: - Menu bar
 
   private func buildMenu() {
-    let mainMenu = NSMenu()
-
-    let appItem = NSMenuItem()
-    mainMenu.addItem(appItem)
-    let appMenu = NSMenu()
-    appItem.submenu = appMenu
     let appName = "DeepSeek Harness"
-    appMenu.addItem(withTitle: "关于 \(appName)", action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: "")
-    appMenu.addItem(.separator())
-    appMenu.addItem(withTitle: "隐藏 \(appName)", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
-    let hideOthers = appMenu.addItem(withTitle: "隐藏其他", action: #selector(NSApplication.hideOtherApplications(_:)), keyEquivalent: "h")
-    hideOthers.keyEquivalentModifierMask = [.command, .option]
-    appMenu.addItem(withTitle: "全部显示", action: #selector(NSApplication.unhideAllApplications(_:)), keyEquivalent: "")
-    appMenu.addItem(.separator())
-    appMenu.addItem(withTitle: "退出 \(appName)", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
-
-    let editItem = NSMenuItem()
-    mainMenu.addItem(editItem)
-    let editMenu = NSMenu(title: "编辑")
-    editItem.submenu = editMenu
-    editMenu.addItem(withTitle: "撤销", action: Selector(("undo:")), keyEquivalent: "z")
-    let redo = editMenu.addItem(withTitle: "重做", action: Selector(("redo:")), keyEquivalent: "Z")
-    redo.keyEquivalentModifierMask = [.command, .shift]
-    editMenu.addItem(.separator())
-    editMenu.addItem(withTitle: "剪切", action: Selector(("cut:")), keyEquivalent: "x")
-    editMenu.addItem(withTitle: "拷贝", action: Selector(("copy:")), keyEquivalent: "c")
-    editMenu.addItem(withTitle: "粘贴", action: Selector(("paste:")), keyEquivalent: "v")
-    editMenu.addItem(withTitle: "全选", action: Selector(("selectAll:")), keyEquivalent: "a")
-
-    let viewItem = NSMenuItem()
-    mainMenu.addItem(viewItem)
-    let viewMenu = NSMenu(title: "显示")
-    viewItem.submenu = viewMenu
-    let reloadItem = viewMenu.addItem(withTitle: "重新加载", action: #selector(reloadPageAction(_:)), keyEquivalent: "r")
-    reloadItem.target = self
-    let openItem = viewMenu.addItem(withTitle: "在浏览器中打开", action: #selector(openInBrowserAction(_:)), keyEquivalent: "O")
-    openItem.keyEquivalentModifierMask = [.command, .shift]
-    openItem.target = self
-
-    let windowItem = NSMenuItem()
-    mainMenu.addItem(windowItem)
-    let windowMenu = NSMenu(title: "窗口")
-    windowItem.submenu = windowMenu
-    windowMenu.addItem(withTitle: "最小化", action: #selector(NSWindow.performMiniaturize(_:)), keyEquivalent: "m")
-    windowMenu.addItem(withTitle: "关闭窗口", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
-    windowMenu.addItem(.separator())
-    windowMenu.addItem(withTitle: "前置全部窗口", action: #selector(NSApplication.arrangeInFront(_:)), keyEquivalent: "")
-
-    NSApp.mainMenu = mainMenu
+    let menus = MainMenuBuilder.build(appName: appName, target: self)
+    NSApp.mainMenu = menus.main
+    NSApp.servicesMenu = menus.services
+    NSApp.windowsMenu = menus.windows
+    NSApp.helpMenu = menus.help
   }
 
-  @objc private func reloadPageAction(_ sender: Any?) {
+  @objc func showSettingsAction(_ sender: Any?) {
+    showMainWindow()
+    webVC?.showSettings()
+  }
+
+  @objc func newSessionAction(_ sender: Any?) {
+    showMainWindow()
+    webVC?.newSession()
+  }
+
+  @objc func reloadPageAction(_ sender: Any?) {
     webVC?.reloadPage()
   }
 
-  @objc private func openInBrowserAction(_ sender: Any?) {
+  @objc func openInBrowserAction(_ sender: Any?) {
     if let url = webVC?.browserURL {
       NSWorkspace.shared.open(url)
+    }
+  }
+
+  @objc func printPageAction(_ sender: Any?) { webVC?.printPage() }
+  @objc func showFindAction(_ sender: Any?) { webVC?.showFind() }
+  @objc func findNextAction(_ sender: Any?) { webVC?.findNext() }
+  @objc func findPreviousAction(_ sender: Any?) { webVC?.findPrevious() }
+  @objc func focusSessionSearchAction(_ sender: Any?) { webVC?.focusSessionSearch() }
+  @objc func toggleSidebarAction(_ sender: Any?) { webVC?.toggleSidebar() }
+  @objc func actualSizeAction(_ sender: Any?) { webVC?.actualSize() }
+  @objc func zoomInAction(_ sender: Any?) { webVC?.zoomIn() }
+  @objc func zoomOutAction(_ sender: Any?) { webVC?.zoomOut() }
+
+  @objc func showHelpAction(_ sender: Any?) {
+    guard let url = URL(string: "https://github.com/wheam/deepseek-harness-mac-app#readme") else { return }
+    NSWorkspace.shared.open(url)
+  }
+
+  func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+    guard let command = MainMenuCommandTag(rawValue: menuItem.tag) else { return true }
+    switch command {
+    case .settings, .newSession, .printPage, .find, .focusSessionSearch,
+      .toggleSidebar, .reload, .actualSize:
+      return webVC?.canRunWebCommands == true
+    case .openInBrowser:
+      return webVC?.browserURL != nil
+    case .findNext, .findPrevious:
+      return webVC?.canFindAgain == true
+    case .zoomIn:
+      return webVC?.canZoomIn == true
+    case .zoomOut:
+      return webVC?.canZoomOut == true
+    case .help:
+      return true
     }
   }
 }

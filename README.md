@@ -6,7 +6,9 @@
 
 <p align="center"><strong>中文</strong> | <a href="#english">English</a></p>
 
-一个零第三方依赖的原生 macOS App（Swift + AppKit + WKWebView）：双击即用 DeepSeek Harness 的浏览器界面——App 自动拉起（或复用）`dsh web` 服务，用标准 macOS 原生窗口展示现有 Web GUI，**页面 UI 零改动**，壳本身只提供原生窗口、菜单栏、进程保活和与页面视觉完全贴合的标题栏。
+> **非官方社区项目**：本仓库由 `wheam` 维护，与 DeepSeek 官方没有从属或背书关系。DeepSeek、DeepSeek Harness 及鲸鱼图形归其各自权利人所有。
+
+一个零外部代码依赖的原生 macOS App（Swift + AppKit + WKWebView）：双击即用 DeepSeek Harness 的浏览器界面——App 自动拉起（或复用）`dsh web` 服务，用标准 macOS 原生窗口展示现有 Web GUI。页面核心功能保持原样；壳只注入少量基于语义 DOM 的原生交互与设置窗口呈现桥接，并提供原生窗口、菜单栏、进程保活和与页面视觉贴合的标题栏。
 
 ## 界面预览 / Screenshots
 
@@ -22,13 +24,14 @@
 
 - **双击打开即用**：自动探测 `127.0.0.1:3080`
   - 已有 `dsh web` 在跑 → 直接复用（窗口里就是那个页面），退出时绝不碰它；
-  - 没有 → 作为子进程拉起 `dsh web`（经登录 shell，继承 `~/.zshrc` 等环境），
+  - 没有 → 作为子进程拉起 `dsh web --no-open`（经登录 shell，继承 `~/.zshrc` 等环境），
     解析 `dsh web: http://127.0.0.1:<port>` 就绪行后加载页面；
   - 端口被其他程序占用 → 换一个系统分配的空闲端口。
 - **符合 macOS 惯例的窗口行为**
   - Cmd+W / 红灯关窗：只关窗口，App 留在 Dock、服务继续运行；点 Dock 图标窗口回来（页面状态保留）；
   - Cmd+Q 退出：优雅停止**它自己拉起**的服务（SIGTERM，7 秒兜底 SIGKILL）；复用的既有服务永不误杀。
 - **保活**：拉起的服务意外崩溃后 2 秒自动重启（60 秒内最多 3 次，超过弹窗报错）。
+- **复用服务自愈**：连接到外部 `dsh web` 后会低频检查健康状态；外部服务消失时自动拉起自己的替代服务，但退出 App 时仍绝不终止外部服务。
 - **单实例**：重复双击只聚焦已有窗口，不会起第二个服务。
 - **未安装 dsh 自动处理**：启动时直接执行 `npm install -g @deepseek-ai/dsh`，无需确认；如果已通过
   Homebrew、`nvm`、`fnm`、`asdf`、`volta`、`mise` 或自定义 npm prefix 安装，则自动识别并复用同一份全局 CLI；
@@ -37,17 +40,21 @@
   中间画页面同款 1px 分界线，宽度实时跟随侧栏（折叠/拖拽），颜色与深浅主题随页面自动跟随
   （采样页面的 `--dsw-specific-sidebar-fill` / `--dsw-alias-bg-base` / `--dsw-alias-border-l1` 设计令牌，令牌缺失时回退系统样式）。
 - **外部链接**一律交给默认浏览器，不会顶掉壳内页面；`target="_blank"` 同样外投。
-- 菜单栏：关于 / 退出、编辑（撤销/剪贴板）、重新加载 (⌘R)、在浏览器中打开 (⇧⌘O)、窗口。
+- **原生菜单与快捷键**：完整的 App / 文件 / 编辑 / 显示 / 窗口 / 帮助菜单；支持设置 (⌘,)、
+  新建会话 (⌘N)、打印 (⌘P)、页内查找 (⌘F / ⌘G / ⇧⌘G)、会话搜索 (⌥⌘F)、侧栏 (⌥⌘S)、
+  重新加载 (⌘R)、缩放 (⌘+ / ⌘- / ⌘0)、在浏览器中打开 (⇧⌘O) 和 macOS 标准编辑/窗口快捷键。
+- **原生交互桥接**：空白区域右键不再显示浏览器菜单；会话/工作区右键直接显示重命名、分叉、归档等对象操作；
+  文本、链接和输入框仍保留 macOS 的查询、翻译、拷贝、拼写与服务菜单。网页附件选择使用系统打开面板，下载使用系统保存面板。
 - **图标**：白底黑鲸鱼 DeepSeek logo（路径取自 dsh web 官方 favicon，构建时由脚本生成；
   现成的 `resources/AppIcon.icns` 也在仓库里）。
 - **启动自动更新**：全局安装的 dsh CLI 会自动升级到 npm 最新版（服务拉起前完成）；
-  App 外壳会自动检查 GitHub 的最新构建，发现新版本就自动下载、替换并提示重启（`--no-auto-update` 可关闭）。
+  App 外壳会自动检查 GitHub 的最新构建，严格核对 GitHub SHA256、完整代码签名、Bundle ID 和固定发布证书指纹后才替换并提示重启（`--no-auto-update` 可关闭）。重启助手会等待旧进程及其服务完全退出后再打开新版本。
 
 日志：`~/Library/Logs/DeepSeekHarness/deepseek-harness.log`。
 
 ### 环境要求
 
-- macOS 13+（Apple Silicon 与 Intel 均可）
+- macOS 13+（Apple Silicon 与 Intel 均可；CI 在 GitHub 当前可用的 macOS 15 ARM 与 Intel 实机 runner 上分别测试，产物部署目标仍为 13.0）
 - Xcode 命令行工具（`swift`、`iconutil`）——仅构建时需要
 - Node.js（含 npm）：推荐的一键安装脚本会在缺失时自动安装；只手动下载 App 时需要预先准备
 
@@ -76,7 +83,7 @@ curl -fsSL https://github.com/wheam/deepseek-harness-mac-app/releases/download/l
 脚本会先检查 Node.js/npm 和 dsh：已有的直接复用；没有 npm 时优先用现有 Homebrew 安装 Node.js，
 否则下载并校验 Node.js 官方 LTS macOS 安装包（系统会请求一次管理员密码）。随后把 dsh 安装到 npm 的可写全局目录；
 如果系统全局目录不可写，则使用共享的用户级全局目录 `~/.local` 并写入终端 PATH。最后脚本下载最新的
-`DeepSeek-Harness.zip`、校验代码签名、安装到 `/Applications`（无写权限时用 `~/Applications`）并打开。
+`DeepSeek-Harness.zip`、核对压缩包 SHA256、完整代码签名、Bundle ID 与固定发布证书指纹，再安装到 `/Applications`（无写权限时用 `~/Applications`）并打开。
 因为不是浏览器下载，App 不带隔离（quarantine）属性，**首次打开不会有任何「无法验证开发者」警告**。
 
 **或手动下载：**
@@ -93,7 +100,7 @@ curl -fsSL https://github.com/wheam/deepseek-harness-mac-app/releases/download/l
      ```sh
      xattr -cr "/Applications/DeepSeek Harness.app"
      ```
-4. 之后无需手动更新：App 每次启动会自动检查并更新自身与全局安装的 dsh CLI（自动更新会顺带移除隔离属性；
+4. 之后无需手动更新：App 每次启动会自动检查并更新自身与全局安装的 dsh CLI（自动更新只接受固定发布证书签名的构建，并会顺带移除隔离属性；
    可用 `--no-auto-update` 关闭）。
 
 > 若提示「已损坏，无法打开」：说明签名校验没通过（如下载/解压过程中文件被改动、签名证书过期或不合规）。
@@ -124,6 +131,7 @@ Sources/DSHMac/
   main.swift                      入口
   LaunchOptions.swift             命令行参数
   AppLog.swift                    文件日志
+  ReleaseTrust.swift              更新包 SHA256、Bundle ID 与发布证书固定校验
   ExecutableResolver.swift        GUI/终端 PATH、Node 版本管理器与用户 npm prefix 解析
   ServerController.swift          dsh 探测/拉起/就绪/保活/停止
   WebViewController.swift         WKWebView + 双色标题栏 + 主题同步
@@ -159,8 +167,20 @@ install.sh                        curl 一键安装脚本（补齐 Node/dsh、�
   身份签名，macOS 会把每次构建/自动更新认作同一个 App，隐私授权（如"下载文件夹"弹窗）点一次"允许"即永久记住。
   证书用仓库内 `scripts/signing.cnf` 生成；build.sh 会拒绝缺少 Code Signing EKU 的证书并回退 ad-hoc，
   避免出现「已损坏」。
+- **发布身份固定**：公开构建必须使用上述固定证书，当前 DER SHA256 指纹为
+  `b27ec2f2110df554e415d0142ea13ab504f359db1698398b61ef702a4f6f481b`。App 自更新器和一键安装器都会核对该指纹；换证书时必须先发布同时信任新旧指纹的过渡版本。
+- **Bundle ID**：本社区项目使用 `io.github.wheam.deepseek-harness`，不占用 DeepSeek 官方域名命名空间。
+  从旧的 `com.deepseek-ai.harness` 构建升级后，macOS 可能只在第一次重新询问文件夹访问权限并重置窗口位置，这是一次性迁移。
 - 开机自启：在「系统设置 → 通用 → 登录项」里手动添加本 App。
 - 若构建产物曾被 `open` 启动，会被 macOS 启动器登记，可能出现两个同名图标；日常只从 `~/Applications` 打开即可。
+
+### 卸载
+
+1. 退出 App，把 `/Applications/DeepSeek Harness.app` 或 `~/Applications/DeepSeek Harness.app` 移到废纸篓；
+2. 若不再使用命令行版，运行 `npm uninstall -g @deepseek-ai/dsh`；一键安装器曾回退到用户目录时运行
+   `npm uninstall -g --prefix "$HOME/.local" @deepseek-ai/dsh`；
+3. 可选清理日志：`~/Library/Logs/DeepSeekHarness/`。如果不再使用 `~/.local/bin`，可手动删除安装器加到 shell 配置中的
+   `# DeepSeek Harness user-global CLI` 两行。
 
 ---
 
@@ -168,18 +188,21 @@ install.sh                        curl 一键安装脚本（补齐 Node/dsh、�
 
 ## English
 
-A native macOS app for the [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) web GUI, built with Swift + AppKit + WKWebView and zero third-party dependencies. Double-click to run: the app starts (or reuses) `dsh web`, keeps it alive, and shows the stock web UI inside a native window — the page itself is never modified.
+> **Unofficial community project:** maintained by `wheam`; not affiliated with or endorsed by DeepSeek. DeepSeek, DeepSeek Harness, and the whale artwork belong to their respective rights holders.
+
+A native macOS app for the [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) web GUI, built with Swift + AppKit + WKWebView and no external code dependencies. Double-click to run: the app starts (or reuses) `dsh web`, keeps it alive, and shows the existing web UI inside a native window. Core page behavior stays intact; the shell injects small semantic bridges for native interactions and settings presentation.
 
 ### What it does
 
 - **Double-click and go**: probes `127.0.0.1:3080`
   - a running `dsh web` is reused as-is and never touched on quit;
-  - otherwise the app spawns `dsh web` as a child process (through the login shell, inheriting `~/.zshrc` etc.) and loads the page once the `dsh web: http://127.0.0.1:<port>` readiness line appears;
+  - otherwise the app spawns `dsh web --no-open` as a child process (through the login shell, inheriting `~/.zshrc` etc.) and loads the page once the `dsh web: http://127.0.0.1:<port>` readiness line appears;
   - a port occupied by something else falls back to an OS-assigned port.
 - **macOS-native window behavior**
   - Cmd+W / the red traffic light closes only the window; the app and the server stay alive in the Dock, and clicking the Dock icon restores the window with page state intact;
   - Cmd+Q quits the app and gracefully stops the server it spawned (SIGTERM, SIGKILL after 7s); an attached pre-existing server is never killed.
 - **Keep-alive**: a spawned server that crashes restarts after 2s (up to 3 times per 60s, then the app reports).
+- **Attached-server recovery**: an externally started `dsh web` is checked at a low frequency. If it disappears, the app starts its own replacement; quitting the app still never terminates an external process.
 - **Single instance**: launching again just focuses the existing window.
 - **Automatic dsh setup**: when no `dsh` binary is found, the app runs
   `npm install -g @deepseek-ai/dsh` without a confirmation dialog. Existing Homebrew, `nvm`, `fnm`, `asdf`,
@@ -187,15 +210,18 @@ A native macOS app for the [DeepSeek Harness](https://github.com/deepseek-ai/dee
   itself is missing, the app offers a **Run Full Installer** action that bootstraps Node.js/npm and dsh in Terminal.
 - **Titlebar that continues the page layout**: a separator-free, title-less two-tone strip painted with the page's own design tokens — sidebar color over the sidebar width, content color over the rest, and the page's 1px column border between them. The split follows sidebar collapse/drag live and both colors follow the page's light/dark theme (falls back to the system look if the tokens disappear in a future dsh build).
 - **External links** (including `target="_blank"`) open in the default browser instead of replacing the shell page.
-- Menu bar: About / Quit, Edit (undo/clipboard), Reload (⌘R), Open in Browser (⇧⌘O), Window.
+- **Native menus and shortcuts**: complete App / File / Edit / View / Window / Help menus, including Settings
+  (⌘,), New Session (⌘N), Print (⌘P), in-page Find (⌘F / ⌘G / ⇧⌘G), session search (⌥⌘F),
+  sidebar toggle (⌥⌘S), Reload (⌘R), Zoom (⌘+ / ⌘- / ⌘0), Open in Browser (⇧⌘O), and the standard macOS editing/window commands.
+- **Native interaction bridge**: blank-area right-clicks no longer expose browser chrome; session/workspace right-clicks show object actions such as Rename, Fork, and Archive. Text, links, and editable controls retain macOS Look Up, Translate, Copy, spelling, and Services items. Web file inputs use the system Open panel and downloads use the system Save panel.
 - **Icon**: the black DeepSeek whale on a white tile — the path is the official dsh web favicon path, rendered at build time (`scripts/make-icon.swift`); a ready-made `resources/AppIcon.icns` is committed too.
-- **Auto-update on launch**: the global dsh CLI upgrades to the registry's latest (before the server starts); the shell checks the rolling GitHub build, downloads and swaps in the newer bundle, and offers a restart (`--no-auto-update` disables updates, but a missing CLI is still installed).
+- **Auto-update on launch**: the global dsh CLI upgrades to the registry's latest (before the server starts); the shell accepts a newer GitHub bundle only after verifying its GitHub SHA256, full code signature, bundle identifier, and pinned release-certificate fingerprint. Its relaunch helper waits for the old process and managed server to exit before opening the replacement (`--no-auto-update` disables updates, but a missing CLI is still installed).
 
 Logs: `~/Library/Logs/DeepSeekHarness/deepseek-harness.log`.
 
 ### Requirements
 
-- macOS 13+ (Apple Silicon and Intel)
+- macOS 13+ (Apple Silicon and Intel; CI runs separately on GitHub's currently available macOS 15 ARM and Intel hosts, while the shipped deployment target remains 13.0)
 - Xcode Command Line Tools (`swift`, `iconutil`) — build time only
 - Node.js (including npm): the recommended one-line installer bootstraps it when missing; manual app downloads require it
 
@@ -225,7 +251,7 @@ The script first checks Node.js/npm and dsh, reusing existing installations. If 
 Homebrew installation or downloads and verifies the official Node.js LTS macOS package (which requests administrator
 authorization once). It installs dsh into a writable npm global prefix, falling back to the shared user-global
 `~/.local` prefix and adding it to the shell PATH when the system prefix is not writable. It then downloads the latest
-`DeepSeek-Harness.zip`, verifies the code signature, installs it into `/Applications` (or `~/Applications` if needed),
+`DeepSeek-Harness.zip`, verifies its SHA256, full code signature, bundle identifier, and pinned release-certificate fingerprint, installs it into `/Applications` (or `~/Applications` if needed),
 and opens the app. Because it is not a browser download, the app carries no quarantine attribute and opens with
 **no "unidentified developer" warning at all**.
 
@@ -245,7 +271,7 @@ and opens the app. Because it is not a browser download, the app carries no quar
      xattr -cr "/Applications/DeepSeek Harness.app"
      ```
 4. No manual updates after that: on every launch the app checks for and applies updates to itself and to a
-   globally installed dsh CLI (auto-updates strip quarantine too; `--no-auto-update` disables this).
+   globally installed dsh CLI (shell updates must match the pinned release identity and strip quarantine only after verification; `--no-auto-update` disables this).
 
 > If macOS says the app "is damaged and can't be opened", signature validation failed (e.g. the file was altered
 > during download/unzip, or the signing certificate expired or is malformed). Run
@@ -277,6 +303,7 @@ Sources/DSHMac/
   main.swift                      entry point
   LaunchOptions.swift             command-line flags
   AppLog.swift                    file logging
+  ReleaseTrust.swift              update SHA256, bundle-ID, and release-certificate pinning
   ExecutableResolver.swift        GUI/shell PATH, Node version-manager, and user npm-prefix discovery
   ServerController.swift          dsh probe/spawn/readiness/keep-alive/stop
   WebViewController.swift         WKWebView + two-tone titlebar + theme sync
@@ -314,9 +341,20 @@ install.sh                        one-line curl installer (bootstraps Node/dsh, 
   remembers privacy grants (like the Downloads-folder prompt) permanently after a single "Allow". Generate the
   certificate with the repo's `scripts/signing.cnf`; build.sh refuses certificates without the Code Signing EKU
   (falling back to ad-hoc) so they cannot produce "damaged" builds.
+- Public release identity: shipped builds must use that fixed certificate. Its current DER SHA256 is
+  `b27ec2f2110df554e415d0142ea13ab504f359db1698398b61ef702a4f6f481b`; both the built-in updater and one-line installer pin it. Certificate rotation therefore requires a transition build that trusts both fingerprints first.
+- Bundle identifier: this community project uses `io.github.wheam.deepseek-harness` rather than DeepSeek's domain namespace.
+  Upgrading from an old `com.deepseek-ai.harness` build may cause macOS to ask for folder access once again and reset the saved window position.
 - Launch at login: add the app manually in System Settings → General → Login Items.
 - If a build artifact was ever launched with `open`, macOS registers it with the launcher and you may see two same-named icons; just always open the copy in `~/Applications`.
 
+### Uninstall
+
+1. Quit the app and move `/Applications/DeepSeek Harness.app` or `~/Applications/DeepSeek Harness.app` to Trash.
+2. If the CLI is no longer needed, run `npm uninstall -g @deepseek-ai/dsh`; if the installer used its user fallback, run
+   `npm uninstall -g --prefix "$HOME/.local" @deepseek-ai/dsh`.
+3. Optionally remove `~/Library/Logs/DeepSeekHarness/`. If `~/.local/bin` is no longer used, remove the two installer-added lines headed `# DeepSeek Harness user-global CLI` from the applicable shell profile.
+
 ## License
 
-MIT — see [LICENSE](LICENSE). The whale logo path comes from the [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) web favicon and follows that project's licensing.
+The source code in this repository is MIT-licensed; see [LICENSE](LICENSE). The DeepSeek name, product names, and whale artwork are not granted by this repository's MIT license and remain the property of their respective rights holders. The bundled whale path is derived from the [DeepSeek Harness](https://github.com/deepseek-ai/deepseek-harness) web favicon and remains subject to the upstream project's terms.
