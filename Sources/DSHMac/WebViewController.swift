@@ -1,6 +1,71 @@
 import AppKit
 import WebKit
 
+/// A browser-resolved sRGB color. The page sends byte components instead of
+/// CSS text so minifiers and browsers are free to serialize the same color as
+/// `#fff`, `rgb(...)`, `color(...)`, etc. without changing the native bridge
+/// contract.
+struct PageRGBAColor: Equatable {
+  let red: Double
+  let green: Double
+  let blue: Double
+  let alpha: Double
+
+  init?(jsonValue: Any?) {
+    guard let values = jsonValue as? [Any], values.count == 4 else { return nil }
+    let components = values.compactMap { ($0 as? NSNumber)?.doubleValue }
+    guard components.count == 4,
+      components.allSatisfy({ $0.isFinite && (0 ... 255).contains($0) }) else { return nil }
+    red = components[0]
+    green = components[1]
+    blue = components[2]
+    alpha = components[3]
+  }
+
+  var nsColor: NSColor {
+    NSColor(calibratedRed: red / 255, green: green / 255,
+      blue: blue / 255, alpha: alpha / 255)
+  }
+}
+
+/// Validated native half of the page-to-titlebar protocol.
+struct PageTitlebarTheme: Equatable {
+  let sidebar: PageRGBAColor
+  let content: PageRGBAColor
+  let border: PageRGBAColor?
+  let sidebarWidth: Double
+  let dark: Bool
+
+  init?(json: [String: Any]) {
+    guard json["ok"] as? Bool == true,
+      let sidebar = PageRGBAColor(jsonValue: json["sidebarRGBA"]),
+      let content = PageRGBAColor(jsonValue: json["contentRGBA"]),
+      let width = (json["sidebarWidth"] as? NSNumber)?.doubleValue,
+      width.isFinite, width > 0 else { return nil }
+    self.sidebar = sidebar
+    self.content = content
+    border = PageRGBAColor(jsonValue: json["borderRGBA"])
+    sidebarWidth = width
+    dark = json["dark"] as? Bool ?? false
+  }
+}
+
+/// Prevents one or two transient samples during page/theme transitions from
+/// replacing a good native strip. A third consecutive failure authorizes the
+/// controller's system-style fallback.
+struct TitlebarThemeSampleGuard {
+  private(set) var consecutiveFailures = 0
+
+  mutating func recordSuccess() {
+    consecutiveFailures = 0
+  }
+
+  mutating func recordFailure() -> Bool {
+    consecutiveFailures += 1
+    return consecutiveFailures == 3
+  }
+}
+
 /// The top strip that replaces the transparent-titlebar background: it is
 /// painted two-tone (sidebar color over the sidebar width, content color
 /// over the rest) so the window top continues the page's column colors
@@ -56,7 +121,8 @@ final class WebViewController: NSViewController, WKNavigationDelegate, WKUIDeleg
   private var targetURL: URL?
   private var hasLoadedOnce = false
   private var sidebarWidth: CGFloat = 0
-  private var appliedState: (String, String, String, Bool, Double)?
+  private var appliedState: PageTitlebarTheme?
+  private var themeSampleGuard = TitlebarThemeSampleGuard()
   private let themeProxy: ThemeMessageProxy
 
   /// Screenshot aids (only active with explicit launch flags): scrub every
@@ -93,56 +159,145 @@ final class WebViewController: NSViewController, WKNavigationDelegate, WKUIDeleg
   private static let loopbackHosts: Set<String> = ["127.0.0.1", "localhost", "[::1]", "harness.internal"]
   private static let themeMessageName = "dshTheme"
 
-  /// Page-side reporter: samples the sidebar/content/border tokens, the dark
-  /// theme attribute, and the live sidebar width, and posts them only when
-  /// something actually changed (dedupe keeps native traffic at zero during
-  /// normal use). The sidebar width is measured by hit-testing the top-left
-  /// column and climbing to its outermost sidebar-colored ancestor, which
-  /// survives CSS-module class renames across dsh builds. One computed-style
-  /// snapshot serves all three token reads.
+  /// Page-side reporter: samples the actual rendered sidebar/content colors
+  /// and live sidebar geometry without depending on CSS-module class names.
+  /// CSS tokens remain fallbacks, but WebKit resolves every accepted CSS color
+  /// through an sRGB canvas and sends byte components to native code. That
+  /// keeps `#fff`, `rgb(...)`, variable indirection, and future serialization
+  /// changes out of the bridge contract.
   private static let themeScript = WKUserScript(
     source: """
     (function () {
       const h = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.dshTheme;
       if (!h) return;
       let lastPayload = '';
+      let lastInvalidPost = 0;
+      let probe = null;
+      const canvas = document.createElement('canvas');
+      canvas.width = 1;
+      canvas.height = 1;
+      const context = canvas.getContext('2d', { willReadFrequently: true });
+
+      const ensureProbe = function (body) {
+        if (probe && probe.isConnected) return probe;
+        probe = document.createElement('span');
+        probe.setAttribute('data-dsh-titlebar-probe', '');
+        probe.style.cssText = 'position:fixed;left:-10000px;top:-10000px;width:0;height:0;pointer-events:none;opacity:0';
+        body.appendChild(probe);
+        return probe;
+      };
+
+      // Resolve arbitrary CSS color syntax (including var() and wide-gamut
+      // color()) in WebKit, then rasterize it to stable sRGB byte components.
+      const rgba = function (value, body) {
+        if (!value || !context) return null;
+        const colorProbe = ensureProbe(body);
+        colorProbe.style.color = '';
+        colorProbe.style.color = value;
+        if (!colorProbe.style.color) return null;
+        const resolved = getComputedStyle(colorProbe).color;
+        context.clearRect(0, 0, 1, 1);
+        context.fillStyle = '#000';
+        context.fillStyle = resolved;
+        context.fillRect(0, 0, 1, 1);
+        return Array.from(context.getImageData(0, 0, 1, 1).data);
+      };
+
+      const sameColor = function (a, b) {
+        return !!a && !!b && a.length === 4 && b.length === 4
+          && a.every(function (part, index) { return part === b[index]; });
+      };
+
+      const renderedBackground = function (start, body) {
+        let el = start;
+        while (el) {
+          let color = null;
+          try { color = rgba(getComputedStyle(el).backgroundColor, body); } catch (e) {}
+          if (color && color[3] > 0) return color;
+          if (el === body) break;
+          el = el.parentElement;
+        }
+        return null;
+      };
+
       const build = function () {
         const body = document.body;
-        if (!body) return null;
+        if (!body) return { ok: false, reason: 'body-not-ready' };
         try {
           const style = getComputedStyle(body);
-          const sidebar = style.getPropertyValue('--dsw-specific-sidebar-fill').trim();
-          const content = style.getPropertyValue('--dsw-alias-bg-base').trim();
-          const border = style.getPropertyValue('--dsw-alias-border-l1').trim();
-          const dark = body.hasAttribute('data-ds-dark-theme');
-          let width = 0;
-          if (sidebar) {
-            let el = document.elementFromPoint(10, 40);
-            let best = null;
-            while (el && el !== body) {
-              let bg = '';
-              try { bg = getComputedStyle(el).backgroundColor; } catch (e) {}
-              if (bg === sidebar) best = el;
-              el = el.parentElement;
+          const tokenSidebar = rgba(style.getPropertyValue('--dsw-specific-sidebar-fill').trim(), body);
+          const tokenContent = rgba(style.getPropertyValue('--dsw-alias-bg-base').trim(), body);
+          const tokenBorder = rgba(style.getPropertyValue('--dsw-alias-border-l1').trim(), body);
+          const pointY = Math.min(Math.max(1, 40), Math.max(1, window.innerHeight - 1));
+          const pointX = Math.min(10, Math.max(1, window.innerWidth - 1));
+          const hit = document.elementFromPoint(pointX, pointY);
+          let el = hit;
+          let geometricCandidate = null;
+          let colorCandidate = null;
+          const minimumHeight = Math.max(40, window.innerHeight * 0.5);
+          while (el && el !== body) {
+            const rect = el.getBoundingClientRect();
+            const plausibleColumn = rect.left <= 1 && rect.right > pointX
+              && rect.width >= 24 && rect.width < window.innerWidth - 24
+              && rect.top <= pointY && rect.bottom >= pointY
+              && rect.height >= minimumHeight;
+            if (plausibleColumn) {
+              geometricCandidate = el;
+              let elementColor = null;
+              try { elementColor = rgba(getComputedStyle(el).backgroundColor, body); } catch (e) {}
+              if (sameColor(elementColor, tokenSidebar)) colorCandidate = el;
             }
-            if (best) width = best.getBoundingClientRect().width;
+            el = el.parentElement;
           }
-          return JSON.stringify({ sidebar, content, border, dark, width });
-        } catch (e) { return null; }
+          const sidebarElement = colorCandidate || geometricCandidate;
+          const sidebarWidth = sidebarElement ? sidebarElement.getBoundingClientRect().width : 0;
+          let sidebarRGBA = null;
+          let borderRGBA = null;
+          if (sidebarElement) {
+            const sidebarStyle = getComputedStyle(sidebarElement);
+            sidebarRGBA = rgba(sidebarStyle.backgroundColor, body);
+            borderRGBA = rgba(sidebarStyle.borderRightColor, body);
+          }
+          if (!sidebarRGBA || sidebarRGBA[3] === 0) {
+            sidebarRGBA = renderedBackground(hit, body) || tokenSidebar;
+          }
+          if (!borderRGBA || borderRGBA[3] === 0) borderRGBA = tokenBorder;
+
+          const contentX = Math.min(Math.max(sidebarWidth + 10, pointX), Math.max(pointX, window.innerWidth - 1));
+          const contentHit = document.elementFromPoint(contentX, pointY);
+          const contentRGBA = renderedBackground(contentHit, body) || tokenContent;
+          if (!sidebarRGBA) return { ok: false, reason: 'sidebar-color-unavailable' };
+          if (!contentRGBA) return { ok: false, reason: 'content-color-unavailable' };
+          if (!(sidebarWidth > 0)) return { ok: false, reason: 'sidebar-geometry-unavailable' };
+
+          // Traffic-light contrast should follow the rendered surface even if
+          // the page changes the attribute it uses to represent dark mode.
+          const luminance = (0.2126 * contentRGBA[0] + 0.7152 * contentRGBA[1] + 0.0722 * contentRGBA[2]) / 255;
+          return { ok: true, sidebarRGBA, contentRGBA, borderRGBA,
+            sidebarWidth, dark: luminance < 0.45 };
+        } catch (e) {
+          return { ok: false, reason: 'sampling-exception' };
+        }
       };
       const post = function () {
-        const p = build();
-        if (!p || p === lastPayload) return;
+        const result = build();
+        const p = JSON.stringify(result);
+        const now = Date.now();
+        if (p === lastPayload && (result.ok || now - lastInvalidPost < 2500)) return;
         lastPayload = p;
+        if (!result.ok) lastInvalidPost = now;
         try { h.postMessage(p); } catch (e) {}
       };
-      window.__dshThemeReport = build;
+      window.__dshThemeReport = function () { return JSON.stringify(build()); };
       let timer = null;
       const schedule = function () {
         if (timer) return;
         timer = setTimeout(function () { timer = null; post(); }, 300);
       };
-      const mo = new MutationObserver(schedule);
+      const mo = new MutationObserver(function (records) {
+        if (records.every(function (record) { return record.target === probe; })) return;
+        schedule();
+      });
       const observe = function () {
         if (document.body) mo.observe(document.body, { attributes: true, subtree: true });
       };
@@ -307,72 +462,63 @@ final class WebViewController: NSViewController, WKNavigationDelegate, WKUIDeleg
       AppLog.shared.info("webview: unparsable theme payload")
       return
     }
-    let sidebar = json["sidebar"] as? String ?? ""
-    let content = json["content"] as? String ?? ""
-    let border = json["border"] as? String ?? ""
-    let dark = json["dark"] as? Bool ?? false
-    let width = json["width"] as? Double ?? 0
-    applyPageTheme(sidebarColorString: sidebar, contentColorString: content,
-      borderColorString: border, sidebarWidth: width, dark: dark)
+    guard let theme = PageTitlebarTheme(json: json) else {
+      handleInvalidThemeSample(reason: json["reason"] as? String ?? "invalid-payload")
+      return
+    }
+    themeSampleGuard.recordSuccess()
+    applyPageTheme(theme)
   }
 
   /// Paint the strip two-tone: sidebar color over the sidebar width, content
   /// color over the rest, with the page's own 1px column border between them.
   /// The window appearance follows the page theme so the title text and
   /// traffic lights keep contrast in both light and dark pages.
-  private func applyPageTheme(sidebarColorString: String, contentColorString: String, borderColorString: String, sidebarWidth: Double, dark: Bool) {
+  private func applyPageTheme(_ theme: PageTitlebarTheme) {
     guard let window = view.window else {
       AppLog.shared.info("webview: theme payload before window attach; skipped")
       return
     }
-    guard let sidebarColor = Self.parseRgbColor(sidebarColorString),
-      let contentColor = Self.parseRgbColor(contentColorString),
-      sidebarWidth > 0 else {
-      // Page tokens missing or renamed in this dsh build: fall back to the
-      // uniform system window look instead of guessing colors.
-      appliedState = nil
-      leftStrip.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
-      rightStrip.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
-      stripBorder.isHidden = true
-      self.sidebarWidth = 0
-      window.backgroundColor = .windowBackgroundColor
-      window.appearance = nil
-      AppLog.shared.info("webview: page tokens unavailable; using system window strip")
-      view.needsLayout = true
-      return
-    }
     // Dedupe: the reporter already suppresses unchanged payloads; this guard
     // keeps any residual repeats from re-touching the window.
-    let state = (sidebarColorString, contentColorString, borderColorString, dark, sidebarWidth)
-    if let appliedState, appliedState == state { return }
-    appliedState = state
-    let widthChanged = self.sidebarWidth != sidebarWidth
-    self.sidebarWidth = sidebarWidth
-    leftStrip.layer?.backgroundColor = sidebarColor.cgColor
-    rightStrip.layer?.backgroundColor = contentColor.cgColor
-    stripBorder.layer?.backgroundColor = (Self.parseRgbColor(borderColorString) ?? NSColor.separatorColor).cgColor
+    if appliedState == theme { return }
+    appliedState = theme
+    let widthChanged = self.sidebarWidth != CGFloat(theme.sidebarWidth)
+    self.sidebarWidth = CGFloat(theme.sidebarWidth)
+    leftStrip.layer?.backgroundColor = theme.sidebar.nsColor.cgColor
+    rightStrip.layer?.backgroundColor = theme.content.nsColor.cgColor
+    stripBorder.layer?.backgroundColor = (theme.border?.nsColor ?? NSColor.separatorColor).cgColor
     stripBorder.isHidden = false
-    window.backgroundColor = contentColor
+    window.backgroundColor = theme.content.nsColor
     // Screenshot dark mode keeps the window appearance as-is: flipping the
     // appearance (or starting dark) leaves this WKWebView rendering a blank
     // surface, while the page's own attribute-driven dark theme renders fine.
     if !shotDark {
-      window.appearance = NSAppearance(named: dark ? .darkAqua : .aqua)
+      window.appearance = NSAppearance(named: theme.dark ? .darkAqua : .aqua)
     }
-    AppLog.shared.info("webview: theme synced (dark=\(dark), sidebar=\(sidebarColorString), content=\(contentColorString), width=\(sidebarWidth))")
+    AppLog.shared.info("webview: theme synced (dark=\(theme.dark), sidebarRGBA=\(theme.sidebar), contentRGBA=\(theme.content), width=\(theme.sidebarWidth))")
     if widthChanged { view.needsLayout = true }
   }
 
-  /// Parse a CSS color string: `rgb(r, g, b)`, `rgb(r g b)`, or `rgba(...)`.
-  static func parseRgbColor(_ string: String) -> NSColor? {
-    let cleaned = string.trimmingCharacters(in: .whitespaces)
-    guard (cleaned.hasPrefix("rgb(") || cleaned.hasPrefix("rgba(")) && cleaned.hasSuffix(")"),
-      let open = cleaned.firstIndex(of: "(") else { return nil }
-    let inner = cleaned[cleaned.index(after: open)..<cleaned.index(before: cleaned.endIndex)]
-    let parts = inner.split { $0 == "," || $0.isWhitespace }.compactMap { Double($0) }
-    guard parts.count >= 3, parts[0] <= 255, parts[1] <= 255, parts[2] <= 255 else { return nil }
-    let alpha = parts.count >= 4 ? min(max(parts[3], 0), 1) : 1
-    return NSColor(calibratedRed: parts[0] / 255, green: parts[1] / 255, blue: parts[2] / 255, alpha: alpha)
+  /// A transient DOM/CSS gap should not flash a previously good titlebar back
+  /// to system white. Repeated failures still fail safe if the page genuinely
+  /// changes structure in a future build.
+  private func handleInvalidThemeSample(reason: String) {
+    let shouldFallBack = themeSampleGuard.recordFailure()
+    if themeSampleGuard.consecutiveFailures == 1 {
+      AppLog.shared.info("webview: titlebar sample unavailable (\(reason)); retaining last valid strip")
+    }
+    guard shouldFallBack else { return }
+    guard let window = view.window else { return }
+    appliedState = nil
+    leftStrip.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
+    rightStrip.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
+    stripBorder.isHidden = true
+    sidebarWidth = 0
+    window.backgroundColor = .windowBackgroundColor
+    window.appearance = nil
+    AppLog.shared.info("webview: titlebar sampling failed repeatedly; using system window strip")
+    view.needsLayout = true
   }
 
   // MARK: - WKNavigationDelegate
