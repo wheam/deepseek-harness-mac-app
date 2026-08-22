@@ -92,12 +92,29 @@ final class ThemeMessageProxy: NSObject, WKScriptMessageHandler {
   }
 }
 
+final class ContextMenuMessageProxy: NSObject, WKScriptMessageHandler {
+  weak var owner: WebViewController?
+
+  func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+    owner?.handleContextMenuMessage(message)
+  }
+}
+
+final class FindSearchField: NSSearchField {
+  var onCancel: (() -> Void)?
+
+  override func cancelOperation(_ sender: Any?) {
+    onCancel?()
+  }
+}
+
 /// The native window content: a WKWebView below a two-tone titlebar strip,
 /// plus a minimal loading overlay. The page inside is the stock dsh web UI —
 /// this class never alters it. It samples the page's design tokens to keep
 /// the strip an exact continuation of the page's column layout.
-final class WebViewController: NSViewController, WKNavigationDelegate, WKUIDelegate {
-  let webView: WKWebView
+final class WebViewController: NSViewController, WKNavigationDelegate, WKUIDelegate,
+  WKDownloadDelegate, NSSearchFieldDelegate {
+  let webView: NativeWebView
 
   /// Called when the user clicks the overlay's retry button.
   var onRetry: (() -> Void)?
@@ -118,12 +135,19 @@ final class WebViewController: NSViewController, WKNavigationDelegate, WKUIDeleg
   private let spinner = NSProgressIndicator()
   private let statusLabel = NSTextField(labelWithString: "")
   private let retryButton = NSButton(title: "重试", target: nil, action: nil)
+  private let findBar = NSVisualEffectView()
+  private let findField = FindSearchField()
+  private let findStatus = NSTextField(labelWithString: "")
+  private let findPreviousButton = NSButton(title: "‹", target: nil, action: nil)
+  private let findNextButton = NSButton(title: "›", target: nil, action: nil)
+  private let findCloseButton = NSButton(title: "×", target: nil, action: nil)
   private var targetURL: URL?
   private var hasLoadedOnce = false
   private var sidebarWidth: CGFloat = 0
   private var appliedState: PageTitlebarTheme?
   private var themeSampleGuard = TitlebarThemeSampleGuard()
   private let themeProxy: ThemeMessageProxy
+  private let contextMenuProxy: ContextMenuMessageProxy
 
   /// Screenshot aids (only active with explicit launch flags): scrub every
   /// text node to placeholder content and/or force the dark page theme.
@@ -158,6 +182,92 @@ final class WebViewController: NSViewController, WKNavigationDelegate, WKUIDeleg
 
   private static let loopbackHosts: Set<String> = ["127.0.0.1", "localhost", "[::1]", "harness.internal"]
   private static let themeMessageName = "dshTheme"
+  private static let contextMenuMessageName = "dshContextMenu"
+
+  /// Converts the existing session/workspace action buttons into a native
+  /// contextual menu. Text selection, links, and editable controls stay with
+  /// WebKit so macOS keeps its standard Look Up/Translate/Edit menus.
+  private static let contextMenuScript = WKUserScript(
+    source: """
+    (function () {
+      const h = window.webkit && window.webkit.messageHandlers
+        && window.webkit.messageHandlers.dshContextMenu;
+      if (!h) return;
+      const actionPattern = /(重命名|分叉|归档|删除|新建会话|rename|fork|archive|delete|new session)/i;
+      const destructivePattern = /(归档|删除|archive|delete)/i;
+      const editable = function (element) {
+        return !!(element && element.closest
+          && element.closest('input,textarea,[contenteditable="true"],a[href]'));
+      };
+      let pointerSelectionTarget = null;
+      let pointerHadSelectedText = false;
+      document.addEventListener('pointerdown', function (event) {
+        if (event.button !== 2 && !(event.button === 0 && event.ctrlKey)) return;
+        const target = event.target instanceof Element ? event.target : null;
+        const selection = window.getSelection && window.getSelection();
+        const range = selection && selection.rangeCount ? selection.getRangeAt(0) : null;
+        pointerSelectionTarget = target;
+        pointerHadSelectedText = !!(target && selection && !selection.isCollapsed
+          && selection.toString().trim() && range && range.intersectsNode
+          && range.intersectsNode(target));
+      }, true);
+      document.addEventListener('contextmenu', function (event) {
+        const target = event.target instanceof Element ? event.target : null;
+        if (!target || editable(target)) return;
+        const samePointerTarget = pointerSelectionTarget
+          && (pointerSelectionTarget === target || pointerSelectionTarget.contains(target)
+            || target.contains(pointerSelectionTarget));
+        const preserveSelectedText = !!(samePointerTarget && pointerHadSelectedText);
+        pointerSelectionTarget = null;
+        pointerHadSelectedText = false;
+        if (preserveSelectedText) return;
+
+        const actionTarget = target.closest(
+          'button[aria-label],[role="button"][aria-label]');
+        const actionTargetLabel = actionTarget
+          ? (actionTarget.getAttribute('aria-label') || '').trim() : '';
+        if (actionTarget && (actionTarget.disabled || actionPattern.test(actionTargetLabel))) return;
+
+        let container = target;
+        let actionButtons = [];
+        for (let depth = 0; container && depth < 7; depth += 1, container = container.parentElement) {
+          const candidates = Array.from(container.querySelectorAll(
+            'button[aria-label],[role="button"][aria-label]'))
+            .filter(function (button) {
+              if (button.disabled) return false;
+              const label = (button.getAttribute('aria-label') || '').trim();
+              return actionPattern.test(label);
+            });
+          if (candidates.length >= 2 && candidates.length <= 4) {
+            actionButtons = candidates;
+            break;
+          }
+        }
+        if (!actionButtons.length) return;
+
+        event.preventDefault();
+        event.stopPropagation();
+        const nonce = ('dshctx_' + Date.now().toString(36) + '_'
+          + Math.random().toString(36).slice(2)).replace(/[^A-Za-z0-9_-]/g, '').slice(0, 60);
+        const actions = actionButtons.map(function (button, index) {
+          const token = nonce + '_' + index;
+          button.setAttribute('data-dsh-native-menu-token', token);
+          const title = (button.getAttribute('aria-label') || button.textContent || '').trim();
+          return { token, title, destructive: destructivePattern.test(title) };
+        });
+        try { h.postMessage({ x: event.clientX, y: event.clientY, actions }); } catch (e) {}
+        setTimeout(function () {
+          actionButtons.forEach(function (button) {
+            if ((button.getAttribute('data-dsh-native-menu-token') || '').startsWith(nonce)) {
+              button.removeAttribute('data-dsh-native-menu-token');
+            }
+          });
+        }, 60000);
+      }, true);
+    })();
+    """,
+    injectionTime: .atDocumentEnd,
+    forMainFrameOnly: true)
 
   /// Page-side reporter: samples the actual rendered sidebar/content colors
   /// and live sidebar geometry without depending on CSS-module class names.
@@ -314,20 +424,29 @@ final class WebViewController: NSViewController, WKNavigationDelegate, WKUIDeleg
 
   init() {
     let proxy = ThemeMessageProxy()
+    let contextProxy = ContextMenuMessageProxy()
     let configuration = WKWebViewConfiguration()
     // Default store: localStorage/session data persist across launches.
     configuration.websiteDataStore = .default()
     let userContent = WKUserContentController()
     userContent.add(proxy, name: Self.themeMessageName)
+    userContent.add(contextProxy, name: Self.contextMenuMessageName)
     userContent.addUserScript(Self.themeScript)
+    userContent.addUserScript(Self.contextMenuScript)
     configuration.userContentController = userContent
-    let webView = WKWebView(frame: .zero, configuration: configuration)
+    let webView = NativeWebView(frame: .zero, configuration: configuration)
     self.webView = webView
     self.themeProxy = proxy
+    self.contextMenuProxy = contextProxy
     super.init(nibName: nil, bundle: nil)
     proxy.owner = self
+    contextProxy.owner = self
     webView.navigationDelegate = self
     webView.uiDelegate = self
+    webView.allowsMagnification = true
+    webView.backgroundMenuProvider = { [weak self] in
+      self?.makeBackgroundContextMenu() ?? []
+    }
     if #available(macOS 13.3, *) { webView.isInspectable = true }
   }
 
@@ -369,6 +488,61 @@ final class WebViewController: NSViewController, WKNavigationDelegate, WKUIDeleg
     ])
     root.addSubview(overlay)
 
+    findBar.material = .popover
+    findBar.blendingMode = .withinWindow
+    findBar.state = .active
+    findBar.wantsLayer = true
+    findBar.layer?.cornerRadius = 9
+    findBar.layer?.borderWidth = 1
+    findBar.layer?.borderColor = NSColor.separatorColor.cgColor
+    findBar.isHidden = true
+
+    findField.placeholderString = "在当前会话中查找"
+    findField.delegate = self
+    findField.target = self
+    findField.action = #selector(findNextPressed)
+    findField.sendsSearchStringImmediately = true
+    findField.onCancel = { [weak self] in self?.hideFind() }
+    findStatus.textColor = .secondaryLabelColor
+    findStatus.alignment = .center
+    findStatus.font = NSFont.systemFont(ofSize: 11)
+    findStatus.setContentHuggingPriority(.required, for: .horizontal)
+
+    for button in [findPreviousButton, findNextButton, findCloseButton] {
+      button.bezelStyle = .inline
+      button.controlSize = .small
+    }
+    findPreviousButton.toolTip = "查找上一个"
+    findPreviousButton.target = self
+    findPreviousButton.action = #selector(findPreviousPressed)
+    findNextButton.toolTip = "查找下一个"
+    findNextButton.target = self
+    findNextButton.action = #selector(findNextPressed)
+    findCloseButton.toolTip = "关闭查找"
+    findCloseButton.target = self
+    findCloseButton.action = #selector(findClosePressed)
+
+    let findStack = NSStackView(views: [
+      findField, findStatus, findPreviousButton, findNextButton, findCloseButton,
+    ])
+    findStack.orientation = .horizontal
+    findStack.alignment = .centerY
+    findStack.spacing = 4
+    findStack.translatesAutoresizingMaskIntoConstraints = false
+    findBar.addSubview(findStack)
+    NSLayoutConstraint.activate([
+      findStack.leadingAnchor.constraint(equalTo: findBar.leadingAnchor, constant: 8),
+      findStack.trailingAnchor.constraint(equalTo: findBar.trailingAnchor, constant: -6),
+      findStack.topAnchor.constraint(equalTo: findBar.topAnchor, constant: 5),
+      findStack.bottomAnchor.constraint(equalTo: findBar.bottomAnchor, constant: -5),
+      findField.widthAnchor.constraint(greaterThanOrEqualToConstant: 210),
+      findStatus.widthAnchor.constraint(greaterThanOrEqualToConstant: 40),
+      findPreviousButton.widthAnchor.constraint(equalToConstant: 24),
+      findNextButton.widthAnchor.constraint(equalToConstant: 24),
+      findCloseButton.widthAnchor.constraint(equalToConstant: 24),
+    ])
+    root.addSubview(findBar)
+
     // The strip sits above the webview in the titlebar band; its subviews
     // are plain colored layers repositioned by viewDidLayout.
     for piece in [leftStrip, rightStrip, stripBorder] {
@@ -394,6 +568,12 @@ final class WebViewController: NSViewController, WKNavigationDelegate, WKUIDeleg
     rightStrip.frame = NSRect(x: sidebarWidth, y: 0, width: max(0, bounds.width - sidebarWidth), height: stripHeight)
     webView.frame = NSRect(x: 0, y: 0, width: bounds.width, height: bounds.height - stripHeight)
     overlay.frame = webView.frame
+    let findWidth = min(CGFloat(390), max(CGFloat(280), bounds.width - 24))
+    findBar.frame = NSRect(
+      x: max(12, bounds.width - findWidth - 12),
+      y: max(8, bounds.height - stripHeight - 46),
+      width: findWidth,
+      height: 36)
   }
 
   /// Show the loading overlay with a status line.
@@ -423,6 +603,181 @@ final class WebViewController: NSViewController, WKNavigationDelegate, WKUIDeleg
   /// The URL to open in the default browser (Cmd+Shift+O).
   var browserURL: URL? { webView.url ?? targetURL }
 
+  var canRunWebCommands: Bool { hasLoadedOnce && webView.url != nil }
+  var canFindAgain: Bool { canRunWebCommands && !findField.stringValue.isEmpty }
+  var canZoomIn: Bool { canRunWebCommands && webView.pageZoom < 2.0 }
+  var canZoomOut: Bool { canRunWebCommands && webView.pageZoom > 0.5 }
+
+  // MARK: - Native menu commands
+
+  func showSettings() {
+    runPageCommand("settings", script: """
+      (() => {
+        const slotButton = document.querySelector(
+          '[data-slot="sidebar.settings"] button[aria-haspopup="dialog"]');
+        const candidates = Array.from(document.querySelectorAll(
+          'button[aria-haspopup="dialog"]'));
+        const labelled = candidates.find((button) =>
+          /设置|settings/i.test(
+            `${button.getAttribute('aria-label') || ''} ${button.textContent || ''}`));
+        const button = slotButton || labelled || (candidates.length === 1 ? candidates[0] : null);
+        if (!button) return false;
+        button.click();
+        button.focus();
+        return true;
+      })()
+      """)
+  }
+
+  func newSession() {
+    runPageCommand("new-session", script: """
+      (() => {
+        const classButton = document.querySelector('button[class*="_newSession"]');
+        const labelled = Array.from(document.querySelectorAll('button[aria-label]'))
+          .find((button) => /^(新建会话|new session)$/i.test(
+            (button.getAttribute('aria-label') || '').trim()));
+        const button = classButton || labelled;
+        if (!button) return false;
+        button.click();
+        button.focus();
+        return true;
+      })()
+      """)
+  }
+
+  func toggleSidebar() {
+    runPageCommand("toggle-sidebar", script: """
+      (() => {
+        const button = Array.from(document.querySelectorAll('button[aria-label]'))
+          .find((candidate) => /侧边栏|sidebar/i.test(
+            candidate.getAttribute('aria-label') || ''));
+        if (!button) return false;
+        button.click();
+        return true;
+      })()
+      """)
+  }
+
+  func focusSessionSearch() {
+    runPageCommand("focus-session-search", script: """
+      (() => {
+        const field = document.querySelector(
+          'input[type="search"],input[role="searchbox"],[role="searchbox"]');
+        if (!field || typeof field.focus !== 'function') return false;
+        field.focus();
+        if (typeof field.select === 'function') field.select();
+        return true;
+      })()
+      """)
+  }
+
+  func printPage() {
+    guard canRunWebCommands else { return }
+    webView.printOperation(with: NSPrintInfo.shared).run()
+  }
+
+  func showFind() {
+    guard canRunWebCommands else { return }
+    findBar.isHidden = false
+    view.needsLayout = true
+    view.window?.makeFirstResponder(findField)
+    findField.selectText(nil)
+  }
+
+  func findNext() {
+    performFind(backwards: false)
+  }
+
+  func findPrevious() {
+    performFind(backwards: true)
+  }
+
+  func hideFind() {
+    findBar.isHidden = true
+    findStatus.stringValue = ""
+    view.window?.makeFirstResponder(webView)
+  }
+
+  func zoomIn() {
+    setPageZoom(webView.pageZoom + 0.1)
+  }
+
+  func zoomOut() {
+    setPageZoom(webView.pageZoom - 0.1)
+  }
+
+  func actualSize() {
+    webView.magnification = 1
+    setPageZoom(1)
+  }
+
+  func controlTextDidChange(_ obj: Notification) {
+    guard obj.object as? NSSearchField === findField else { return }
+    performFind(backwards: false)
+  }
+
+  private func performFind(backwards: Bool) {
+    let query = findField.stringValue
+    guard canRunWebCommands, !query.isEmpty else {
+      findStatus.stringValue = ""
+      return
+    }
+    let configuration = WKFindConfiguration()
+    configuration.backwards = backwards
+    configuration.caseSensitive = false
+    configuration.wraps = true
+    webView.find(query, configuration: configuration) { [weak self] result in
+      self?.findStatus.stringValue = result.matchFound ? "" : "未找到"
+    }
+  }
+
+  private func setPageZoom(_ requested: CGFloat) {
+    guard canRunWebCommands else { return }
+    let clamped = min(CGFloat(2), max(CGFloat(0.5), requested))
+    // Keep stable tenths instead of accumulating floating-point drift.
+    webView.magnification = 1
+    webView.pageZoom = (clamped * 10).rounded() / 10
+    AppLog.shared.info("webview: page zoom \(webView.pageZoom)")
+    samplePageTheme()
+  }
+
+  private func runPageCommand(_ name: String, script: String) {
+    guard canRunWebCommands else {
+      AppLog.shared.info("webview: native command \(name) ignored before page readiness")
+      return
+    }
+    webView.evaluateJavaScript(script) { result, error in
+      let handled = result as? Bool ?? false
+      if let error {
+        AppLog.shared.error("webview: native command \(name) failed: \(error.localizedDescription)")
+      } else if !handled {
+        AppLog.shared.error("webview: native command \(name) unavailable in current page")
+      }
+    }
+  }
+
+  private func makeBackgroundContextMenu() -> [NSMenuItem] {
+    let newSession = NSMenuItem(
+      title: "新建会话", action: #selector(backgroundNewSession(_:)), keyEquivalent: "")
+    newSession.target = self
+    let reload = NSMenuItem(
+      title: "重新加载", action: #selector(backgroundReload(_:)), keyEquivalent: "")
+    reload.target = self
+    let browser = NSMenuItem(
+      title: "在浏览器中打开", action: #selector(backgroundOpenInBrowser(_:)), keyEquivalent: "")
+    browser.target = self
+    return [newSession, .separator(), reload, browser]
+  }
+
+  @objc private func findNextPressed(_ sender: Any?) { findNext() }
+  @objc private func findPreviousPressed(_ sender: Any?) { findPrevious() }
+  @objc private func findClosePressed(_ sender: Any?) { hideFind() }
+  @objc private func backgroundNewSession(_ sender: Any?) { newSession() }
+  @objc private func backgroundReload(_ sender: Any?) { reloadPage() }
+  @objc private func backgroundOpenInBrowser(_ sender: Any?) {
+    if let browserURL { onOpenExternal?(browserURL) }
+  }
+
   private func hideOverlay() {
     spinner.stopAnimation(nil)
     overlay.isHidden = true
@@ -436,6 +791,60 @@ final class WebViewController: NSViewController, WKNavigationDelegate, WKUIDeleg
     } else {
       onRetry?()
     }
+  }
+
+  // MARK: - Page object contextual menus
+
+  func handleContextMenuMessage(_ message: WKScriptMessage) {
+    guard message.name == Self.contextMenuMessageName,
+      let request = WebContextMenuRequest(body: message.body) else {
+      AppLog.shared.info("webview: rejected malformed context-menu message")
+      return
+    }
+    let menu = NSMenu(title: "")
+    var addedNonDestructive = false
+    var separatedDestructive = false
+    for action in request.actions {
+      if action.destructive && addedNonDestructive && !separatedDestructive {
+        menu.addItem(.separator())
+        separatedDestructive = true
+      }
+      let item = NSMenuItem(
+        title: action.title,
+        action: #selector(performWebContextMenuAction(_:)),
+        keyEquivalent: "")
+      item.target = self
+      item.representedObject = action.token
+      if action.destructive {
+        item.attributedTitle = NSAttributedString(
+          string: action.title,
+          attributes: [.foregroundColor: NSColor.systemRed])
+      } else {
+        addedNonDestructive = true
+      }
+      menu.addItem(item)
+    }
+    let point = NSPoint(
+      x: min(max(CGFloat(request.x), 0), webView.bounds.width),
+      y: min(max(webView.bounds.height - CGFloat(request.y), 0), webView.bounds.height))
+    menu.popUp(positioning: nil, at: point, in: webView)
+  }
+
+  @objc private func performWebContextMenuAction(_ sender: NSMenuItem) {
+    guard let token = sender.representedObject as? String,
+      token.range(of: #"^[A-Za-z0-9_-]{1,80}$"#, options: .regularExpression) != nil else {
+      return
+    }
+    let script = """
+      (() => {
+        const button = document.querySelector('[data-dsh-native-menu-token="\(token)"]');
+        if (!button) return false;
+        button.removeAttribute('data-dsh-native-menu-token');
+        button.click();
+        return true;
+      })()
+      """
+    runPageCommand("context-menu-action", script: script)
   }
 
   // MARK: - Titlebar strip theme sync
@@ -554,6 +963,10 @@ final class WebViewController: NSViewController, WKNavigationDelegate, WKUIDeleg
   }
 
   func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
+    if navigationAction.shouldPerformDownload {
+      decisionHandler(.download)
+      return
+    }
     guard let url = navigationAction.request.url, let scheme = url.scheme?.lowercased() else {
       decisionHandler(.cancel)
       return
@@ -575,10 +988,111 @@ final class WebViewController: NSViewController, WKNavigationDelegate, WKUIDeleg
     }
   }
 
+  func webView(_ webView: WKWebView, decidePolicyFor navigationResponse: WKNavigationResponse, decisionHandler: @escaping (WKNavigationResponsePolicy) -> Void) {
+    let disposition = (navigationResponse.response as? HTTPURLResponse)?
+      .value(forHTTPHeaderField: "Content-Disposition")?.lowercased() ?? ""
+    if disposition.contains("attachment") || !navigationResponse.canShowMIMEType {
+      decisionHandler(.download)
+    } else {
+      decisionHandler(.allow)
+    }
+  }
+
+  func webView(_ webView: WKWebView, navigationAction: WKNavigationAction, didBecome download: WKDownload) {
+    download.delegate = self
+  }
+
+  func webView(_ webView: WKWebView, navigationResponse: WKNavigationResponse, didBecome download: WKDownload) {
+    download.delegate = self
+  }
+
   // MARK: - WKUIDelegate
 
   func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration, for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
     if let url = navigationAction.request.url { onOpenExternal?(url) }
     return nil
+  }
+
+  func webView(
+    _ webView: WKWebView,
+    runOpenPanelWith parameters: WKOpenPanelParameters,
+    initiatedByFrame frame: WKFrameInfo,
+    completionHandler: @escaping ([URL]?) -> Void
+  ) {
+    let panel = NSOpenPanel()
+    panel.allowsMultipleSelection = parameters.allowsMultipleSelection
+    panel.canChooseDirectories = parameters.allowsDirectories
+    panel.canChooseFiles = !parameters.allowsDirectories
+    panel.canCreateDirectories = true
+    panel.resolvesAliases = true
+    let finish: (NSApplication.ModalResponse) -> Void = { response in
+      completionHandler(response == .OK ? panel.urls : nil)
+    }
+    if let window = view.window {
+      panel.beginSheetModal(for: window, completionHandler: finish)
+    } else {
+      panel.begin(completionHandler: finish)
+    }
+  }
+
+  // MARK: - WKDownloadDelegate
+
+  func download(
+    _ download: WKDownload,
+    decideDestinationUsing response: URLResponse,
+    suggestedFilename: String,
+    completionHandler: @escaping (URL?) -> Void
+  ) {
+    let panel = NSSavePanel()
+    panel.nameFieldStringValue = Self.safeSuggestedFilename(suggestedFilename)
+    panel.canCreateDirectories = true
+    let finish: (NSApplication.ModalResponse) -> Void = { response in
+      guard response == .OK, let url = panel.url else {
+        completionHandler(nil)
+        return
+      }
+      // NSSavePanel has already presented the standard replacement warning.
+      // WKDownload requires a destination path that does not yet exist.
+      if FileManager.default.fileExists(atPath: url.path) {
+        do {
+          try FileManager.default.removeItem(at: url)
+        } catch {
+          AppLog.shared.error("download: cannot replace destination: \(error.localizedDescription)")
+          completionHandler(nil)
+          return
+        }
+      }
+      completionHandler(url)
+    }
+    if let window = view.window {
+      panel.beginSheetModal(for: window, completionHandler: finish)
+    } else {
+      panel.begin(completionHandler: finish)
+    }
+  }
+
+  func downloadDidFinish(_ download: WKDownload) {
+    AppLog.shared.info("download: finished")
+  }
+
+  func download(_ download: WKDownload, didFailWithError error: Error, resumeData: Data?) {
+    AppLog.shared.error("download: failed: \(error.localizedDescription)")
+    let alert = NSAlert()
+    alert.alertStyle = .warning
+    alert.messageText = "下载失败"
+    alert.informativeText = error.localizedDescription
+    alert.addButton(withTitle: "好")
+    if let window = view.window {
+      alert.beginSheetModal(for: window)
+    } else {
+      alert.runModal()
+    }
+  }
+
+  static func safeSuggestedFilename(_ value: String) -> String {
+    let name = (value as NSString).lastPathComponent
+      .replacingOccurrences(of: ":", with: "-")
+      .trimmingCharacters(in: .whitespacesAndNewlines)
+    return name.isEmpty || name == "." || name == ".." ? "DeepSeek-Harness-Download" : name
   }
 }

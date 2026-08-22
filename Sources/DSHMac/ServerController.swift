@@ -47,6 +47,14 @@ final class ServerController {
   private var logTail: [String] = []
   private var cachedDshPath: String?
 
+  /// Arguments used to start the CLI-owned web server. Kept separate so the
+  /// no-external-browser contract is covered by a regression test.
+  static func webArguments(port requestedPort: Int?) -> [String] {
+    var args = ["web", "--no-open"]
+    if let requestedPort { args += ["--port", String(requestedPort)] }
+    return args
+  }
+
   init(options: LaunchOptions) {
     self.options = options
   }
@@ -109,8 +117,10 @@ final class ServerController {
       return
     }
 
-    var args = ["web"]
-    if let requestedPort { args += ["--port", String(requestedPort)] }
+    // The native shell owns presentation. Newer dsh releases open the
+    // default browser unless explicitly told not to, which would leave the
+    // user with both WKWebView and browser windows on every app launch.
+    let args = Self.webArguments(port: requestedPort)
 
     let process = Process()
     if options.direct {

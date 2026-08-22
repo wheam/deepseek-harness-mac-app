@@ -22,7 +22,7 @@
 
 - **双击打开即用**：自动探测 `127.0.0.1:3080`
   - 已有 `dsh web` 在跑 → 直接复用（窗口里就是那个页面），退出时绝不碰它；
-  - 没有 → 作为子进程拉起 `dsh web`（经登录 shell，继承 `~/.zshrc` 等环境），
+  - 没有 → 作为子进程拉起 `dsh web --no-open`（经登录 shell，继承 `~/.zshrc` 等环境），
     解析 `dsh web: http://127.0.0.1:<port>` 就绪行后加载页面；
   - 端口被其他程序占用 → 换一个系统分配的空闲端口。
 - **符合 macOS 惯例的窗口行为**
@@ -37,7 +37,11 @@
   中间画页面同款 1px 分界线，宽度实时跟随侧栏（折叠/拖拽），颜色与深浅主题随页面自动跟随
   （采样页面的 `--dsw-specific-sidebar-fill` / `--dsw-alias-bg-base` / `--dsw-alias-border-l1` 设计令牌，令牌缺失时回退系统样式）。
 - **外部链接**一律交给默认浏览器，不会顶掉壳内页面；`target="_blank"` 同样外投。
-- 菜单栏：关于 / 退出、编辑（撤销/剪贴板）、重新加载 (⌘R)、在浏览器中打开 (⇧⌘O)、窗口。
+- **原生菜单与快捷键**：完整的 App / 文件 / 编辑 / 显示 / 窗口 / 帮助菜单；支持设置 (⌘,)、
+  新建会话 (⌘N)、打印 (⌘P)、页内查找 (⌘F / ⌘G / ⇧⌘G)、会话搜索 (⌥⌘F)、侧栏 (⌥⌘S)、
+  重新加载 (⌘R)、缩放 (⌘+ / ⌘- / ⌘0)、在浏览器中打开 (⇧⌘O) 和 macOS 标准编辑/窗口快捷键。
+- **原生交互桥接**：空白区域右键不再显示浏览器菜单；会话/工作区右键直接显示重命名、分叉、归档等对象操作；
+  文本、链接和输入框仍保留 macOS 的查询、翻译、拷贝、拼写与服务菜单。网页附件选择使用系统打开面板，下载使用系统保存面板。
 - **图标**：白底黑鲸鱼 DeepSeek logo（路径取自 dsh web 官方 favicon，构建时由脚本生成；
   现成的 `resources/AppIcon.icns` 也在仓库里）。
 - **启动自动更新**：全局安装的 dsh CLI 会自动升级到 npm 最新版（服务拉起前完成）；
@@ -174,7 +178,7 @@ A native macOS app for the [DeepSeek Harness](https://github.com/deepseek-ai/dee
 
 - **Double-click and go**: probes `127.0.0.1:3080`
   - a running `dsh web` is reused as-is and never touched on quit;
-  - otherwise the app spawns `dsh web` as a child process (through the login shell, inheriting `~/.zshrc` etc.) and loads the page once the `dsh web: http://127.0.0.1:<port>` readiness line appears;
+  - otherwise the app spawns `dsh web --no-open` as a child process (through the login shell, inheriting `~/.zshrc` etc.) and loads the page once the `dsh web: http://127.0.0.1:<port>` readiness line appears;
   - a port occupied by something else falls back to an OS-assigned port.
 - **macOS-native window behavior**
   - Cmd+W / the red traffic light closes only the window; the app and the server stay alive in the Dock, and clicking the Dock icon restores the window with page state intact;
@@ -187,7 +191,10 @@ A native macOS app for the [DeepSeek Harness](https://github.com/deepseek-ai/dee
   itself is missing, the app offers a **Run Full Installer** action that bootstraps Node.js/npm and dsh in Terminal.
 - **Titlebar that continues the page layout**: a separator-free, title-less two-tone strip painted with the page's own design tokens — sidebar color over the sidebar width, content color over the rest, and the page's 1px column border between them. The split follows sidebar collapse/drag live and both colors follow the page's light/dark theme (falls back to the system look if the tokens disappear in a future dsh build).
 - **External links** (including `target="_blank"`) open in the default browser instead of replacing the shell page.
-- Menu bar: About / Quit, Edit (undo/clipboard), Reload (⌘R), Open in Browser (⇧⌘O), Window.
+- **Native menus and shortcuts**: complete App / File / Edit / View / Window / Help menus, including Settings
+  (⌘,), New Session (⌘N), Print (⌘P), in-page Find (⌘F / ⌘G / ⇧⌘G), session search (⌥⌘F),
+  sidebar toggle (⌥⌘S), Reload (⌘R), Zoom (⌘+ / ⌘- / ⌘0), Open in Browser (⇧⌘O), and the standard macOS editing/window commands.
+- **Native interaction bridge**: blank-area right-clicks no longer expose browser chrome; session/workspace right-clicks show object actions such as Rename, Fork, and Archive. Text, links, and editable controls retain macOS Look Up, Translate, Copy, spelling, and Services items. Web file inputs use the system Open panel and downloads use the system Save panel.
 - **Icon**: the black DeepSeek whale on a white tile — the path is the official dsh web favicon path, rendered at build time (`scripts/make-icon.swift`); a ready-made `resources/AppIcon.icns` is committed too.
 - **Auto-update on launch**: the global dsh CLI upgrades to the registry's latest (before the server starts); the shell checks the rolling GitHub build, downloads and swaps in the newer bundle, and offers a restart (`--no-auto-update` disables updates, but a missing CLI is still installed).
 
