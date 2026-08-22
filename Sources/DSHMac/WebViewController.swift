@@ -121,6 +121,12 @@ final class TitleStripView: NSView {
   override var mouseDownCanMoveWindow: Bool { true }
 }
 
+/// Visual-only continuation of the page's modal mask. Returning no hit view
+/// preserves titlebar dragging and the native traffic-light controls.
+final class TitlebarModalDimView: NSView {
+  override func hitTest(_ point: NSPoint) -> NSView? { nil }
+}
+
 /// Weak-indirection script-message handler: `WKUserContentController` retains
 /// its handlers, so forwarding through a proxy avoids a retain cycle with the
 /// owning view controller.
@@ -137,6 +143,14 @@ final class ContextMenuMessageProxy: NSObject, WKScriptMessageHandler {
 
   func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
     owner?.handleContextMenuMessage(message)
+  }
+}
+
+final class SettingsPresentationMessageProxy: NSObject, WKScriptMessageHandler {
+  weak var owner: WebViewController?
+
+  func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+    owner?.handleSettingsPresentationMessage(message)
   }
 }
 
@@ -171,6 +185,7 @@ final class WebViewController: NSViewController, WKNavigationDelegate, WKUIDeleg
   private let leftStrip = NSView()
   private let rightStrip = NSView()
   private let stripBorder = NSView()
+  private let titlebarModalDim = TitlebarModalDimView()
   private let overlay = NSView()
   private let spinner = NSProgressIndicator()
   private let statusLabel = NSTextField(labelWithString: "")
@@ -186,8 +201,10 @@ final class WebViewController: NSViewController, WKNavigationDelegate, WKUIDeleg
   private var sidebarWidth: CGFloat = 0
   private var appliedState: PageTitlebarTheme?
   private var themeSampleGuard = TitlebarThemeSampleGuard()
+  private var isSettingsModalOpen = false
   private let themeProxy: ThemeMessageProxy
   private let contextMenuProxy: ContextMenuMessageProxy
+  private let settingsPresentationProxy: SettingsPresentationMessageProxy
 
   /// Screenshot aids (only active with explicit launch flags): scrub every
   /// text node to placeholder content and/or force the dark page theme.
@@ -491,12 +508,14 @@ final class WebViewController: NSViewController, WKNavigationDelegate, WKUIDeleg
   init() {
     let proxy = ThemeMessageProxy()
     let contextProxy = ContextMenuMessageProxy()
+    let settingsProxy = SettingsPresentationMessageProxy()
     let configuration = WKWebViewConfiguration()
     // Default store: localStorage/session data persist across launches.
     configuration.websiteDataStore = .default()
     let userContent = WKUserContentController()
     userContent.add(proxy, name: Self.themeMessageName)
     userContent.add(contextProxy, name: Self.contextMenuMessageName)
+    userContent.add(settingsProxy, name: SettingsPresentation.messageName)
     userContent.addUserScript(SettingsPresentation.script)
     userContent.addUserScript(Self.themeScript)
     userContent.addUserScript(Self.contextMenuScript)
@@ -505,9 +524,11 @@ final class WebViewController: NSViewController, WKNavigationDelegate, WKUIDeleg
     self.webView = webView
     self.themeProxy = proxy
     self.contextMenuProxy = contextProxy
+    self.settingsPresentationProxy = settingsProxy
     super.init(nibName: nil, bundle: nil)
     proxy.owner = self
     contextProxy.owner = self
+    settingsProxy.owner = self
     webView.navigationDelegate = self
     webView.uiDelegate = self
     webView.allowsMagnification = true
@@ -620,6 +641,11 @@ final class WebViewController: NSViewController, WKNavigationDelegate, WKUIDeleg
     stripView.addSubview(leftStrip)
     stripView.addSubview(rightStrip)
     stripView.addSubview(stripBorder)
+    titlebarModalDim.wantsLayer = true
+    titlebarModalDim.layer?.backgroundColor = NSColor.black.withAlphaComponent(0.24).cgColor
+    titlebarModalDim.alphaValue = 0
+    titlebarModalDim.isHidden = true
+    stripView.addSubview(titlebarModalDim)
     stripView.wantsLayer = true
     root.addSubview(stripView)
     view = root
@@ -633,6 +659,7 @@ final class WebViewController: NSViewController, WKNavigationDelegate, WKUIDeleg
     leftStrip.frame = NSRect(x: 0, y: 0, width: max(0, sidebarWidth - 1), height: stripHeight)
     stripBorder.frame = NSRect(x: max(0, sidebarWidth - 1), y: 0, width: 1, height: stripHeight)
     rightStrip.frame = NSRect(x: sidebarWidth, y: 0, width: max(0, bounds.width - sidebarWidth), height: stripHeight)
+    titlebarModalDim.frame = stripView.bounds
     webView.frame = NSRect(x: 0, y: 0, width: bounds.width, height: bounds.height - stripHeight)
     overlay.frame = webView.frame
     let findWidth = min(CGFloat(390), max(CGFloat(280), bounds.width - 24))
@@ -916,6 +943,43 @@ final class WebViewController: NSViewController, WKNavigationDelegate, WKUIDeleg
 
   // MARK: - Titlebar strip theme sync
 
+  /// Extends the web modal's dimming mask across the native title strip. The
+  /// overlay itself never participates in hit testing, so this is purely a
+  /// visual bridge between WebKit and AppKit.
+  func handleSettingsPresentationMessage(_ message: WKScriptMessage) {
+    guard message.name == SettingsPresentation.messageName,
+      let state = SettingsPresentationState(body: message.body) else {
+      AppLog.shared.info("webview: rejected malformed settings-presentation message")
+      return
+    }
+    if let mask = state.mask {
+      titlebarModalDim.layer?.backgroundColor = mask.nsColor.cgColor
+    }
+    setTitlebarDimmed(state.isOpen, animated: true)
+  }
+
+  private func setTitlebarDimmed(_ dimmed: Bool, animated: Bool) {
+    guard dimmed != isSettingsModalOpen else { return }
+    isSettingsModalOpen = dimmed
+    titlebarModalDim.layer?.removeAllAnimations()
+    if dimmed { titlebarModalDim.isHidden = false }
+
+    let finish: () -> Void = { [weak self] in
+      guard let self, !self.isSettingsModalOpen else { return }
+      self.titlebarModalDim.isHidden = true
+    }
+    guard animated else {
+      titlebarModalDim.alphaValue = dimmed ? 1 : 0
+      finish()
+      return
+    }
+    NSAnimationContext.runAnimationGroup({ context in
+      context.duration = 0.16
+      context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+      titlebarModalDim.animator().alphaValue = dimmed ? 1 : 0
+    }, completionHandler: finish)
+  }
+
   /// Entry point for the page-side reporter (called on the main thread).
   func handleThemeMessage(_ message: WKScriptMessage) {
     guard message.name == Self.themeMessageName else { return }
@@ -994,6 +1058,10 @@ final class WebViewController: NSViewController, WKNavigationDelegate, WKUIDeleg
   }
 
   // MARK: - WKNavigationDelegate
+
+  func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
+    setTitlebarDimmed(false, animated: false)
+  }
 
   func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
     hasLoadedOnce = true
