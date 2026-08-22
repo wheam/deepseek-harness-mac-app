@@ -2,13 +2,20 @@ import Darwin
 import Foundation
 
 /// What a loopback probe found on the target port.
-enum ProbeResult {
+enum ProbeResult: Equatable {
   /// A live dsh web instance (identified by its served page marker).
   case dshReady(port: Int)
   /// Something else is listening.
   case otherService
   /// Nothing is listening.
   case free
+}
+
+/// A pure startup decision keeps port-conflict behavior deterministic and
+/// covered by tests instead of burying it in URLSession callbacks.
+enum ServerStartupDecision: Equatable {
+  case attach(port: Int)
+  case spawn(port: Int?)
 }
 
 /// Events the server controller reports to the UI layer (main thread).
@@ -43,9 +50,10 @@ final class ServerController {
   private var readyTimeoutWork: DispatchWorkItem?
   private var stdoutBuffer = Data()
   private var stderrBuffer = Data()
-  private let ioQueue = DispatchQueue(label: "com.deepseek-ai.harness.server-io")
+  private let ioQueue = DispatchQueue(label: "io.github.wheam.deepseek-harness.server-io")
   private var logTail: [String] = []
   private var cachedDshPath: String?
+  private var attachmentMonitorGeneration = 0
 
   /// Arguments used to start the CLI-owned web server. Kept separate so the
   /// no-external-browser contract is covered by a regression test.
@@ -53,6 +61,35 @@ final class ServerController {
     var args = ["web", "--no-open"]
     if let requestedPort { args += ["--port", String(requestedPort)] }
     return args
+  }
+
+  static func startupDecision(
+    for result: ProbeResult,
+    targetPort: Int,
+    hasExplicitPort: Bool,
+    forceSpawn: Bool
+  ) -> ServerStartupDecision {
+    switch result {
+    case .dshReady(let port):
+      return forceSpawn ? .spawn(port: 0) : .attach(port: port)
+    case .free:
+      return .spawn(port: hasExplicitPort ? targetPort : nil)
+    case .otherService:
+      // Never fail merely because the conventional port belongs to another
+      // app. Asking dsh for an OS-assigned port preserves both services.
+      return .spawn(port: 0)
+    }
+  }
+
+  static func replacementPort(afterAttachedProbe result: ProbeResult, attachedPort: Int) -> Int? {
+    switch result {
+    case .dshReady:
+      return nil
+    case .free:
+      return attachedPort
+    case .otherService:
+      return 0
+    }
   }
 
   init(options: LaunchOptions) {
@@ -65,6 +102,7 @@ final class ServerController {
   /// web, or spawn a new one.
   func start() {
     stopping = false
+    attachmentMonitorGeneration += 1
     let targetPort = options.port ?? 3080
     let forced = options.port != nil
     AppLog.shared.info("server: start; target port \(targetPort), forceSpawn=\(options.forceSpawn)")
@@ -73,24 +111,20 @@ final class ServerController {
       : "正在检查本地服务…")
     probe(port: targetPort) { [weak self] result in
       guard let self else { return }
-      switch result {
-      case .dshReady(let port):
-        if self.options.forceSpawn {
-          AppLog.shared.info("server: port \(port) already serves dsh web; spawning on an OS-assigned port instead")
-          self.spawn(port: 0)
-        } else {
-          self.attach(port: port)
+      let decision = Self.startupDecision(
+        for: result,
+        targetPort: targetPort,
+        hasExplicitPort: forced,
+        forceSpawn: self.options.forceSpawn)
+      switch decision {
+      case .attach(let port):
+        self.attach(port: port)
+      case .spawn(let port):
+        if result == .otherService || (self.options.forceSpawn && port == 0) {
+          AppLog.shared.info(
+            "server: port \(targetPort) is already in use; spawning on an OS-assigned port")
         }
-      case .free:
-        self.spawn(port: forced ? targetPort : nil)
-      case .otherService:
-        if forced {
-          AppLog.shared.error("server: port \(targetPort) is used by a non-dsh service; spawning on an OS-assigned port")
-          self.spawn(port: 0)
-        } else {
-          self.delegate?.serverController(self, didFail:
-            "端口 \(targetPort) 已被其他程序占用，且它不是 DeepSeek Harness。", canInstallDsh: false)
-        }
+        self.spawn(port: port)
       }
     }
   }
@@ -103,12 +137,15 @@ final class ServerController {
     serverURL = url
     delegate?.serverController(self, didUpdateStatus: "已连接到本地服务…")
     delegate?.serverController(self, didBecomeReady: url)
+    let generation = attachmentMonitorGeneration
+    scheduleAttachedServerHealthCheck(port: port, generation: generation)
   }
 
   /// Spawn `dsh web` and wait for its readiness line.
   /// @param port - explicit `--port` value; nil keeps dsh's default (3080),
   /// 0 asks the OS to pick a free port.
   private func spawn(port requestedPort: Int?) {
+    attachmentMonitorGeneration += 1
     guard let dshPath = resolveDshBinary() else {
       AppLog.shared.error("server: no dsh binary found")
       delegate?.serverController(self, didFail:
@@ -265,6 +302,7 @@ final class ServerController {
   /// dsh's graceful shutdown budget is 5s; SIGKILL follows at 7s.
   func stop() {
     stopping = true
+    attachmentMonitorGeneration += 1
     readyTimeoutWork?.cancel()
     guard let process = spawnedProcess, process.isRunning else {
       AppLog.shared.info("server: stop; no spawned process to terminate")
@@ -296,7 +334,11 @@ final class ServerController {
   /// @param port - target port.
   /// @param completion - always called on the main queue: every consumer
   /// path reaches AppKit/WKWebView delegate calls.
-  private func probe(port: Int, completion: @escaping (ProbeResult) -> Void) {
+  private func probe(
+    port: Int,
+    logResult: Bool = true,
+    completion: @escaping (ProbeResult) -> Void
+  ) {
     guard let url = URL(string: "http://127.0.0.1:\(port)/") else {
       completion(.free)
       return
@@ -307,21 +349,53 @@ final class ServerController {
     session.dataTask(with: request) { data, response, error in
       let result: ProbeResult
       if error != nil {
-        AppLog.shared.info("server: probe \(port): free (\(error?.localizedDescription ?? ""))")
+        if logResult {
+          AppLog.shared.info("server: probe \(port): free (\(error?.localizedDescription ?? ""))")
+        }
         result = .free
       } else if let http = response as? HTTPURLResponse, let data,
         http.statusCode < 500,
         (String(data: data, encoding: .utf8) ?? "").contains("DeepSeek Harness") {
-        AppLog.shared.info("server: probe \(port): dsh web present")
+        if logResult { AppLog.shared.info("server: probe \(port): dsh web present") }
         result = .dshReady(port: port)
       } else {
-        AppLog.shared.info("server: probe \(port): other service")
+        if logResult { AppLog.shared.info("server: probe \(port): other service") }
         result = .otherService
       }
       // URLSession completion handlers run on a background queue; delegate
       // calls touch WKWebView/AppKit, which requires the main thread.
       DispatchQueue.main.async { completion(result) }
     }.resume()
+  }
+
+  /// An attached process is intentionally not owned or terminated by this app,
+  /// but it can still disappear. Recovering keeps the window useful and also
+  /// makes the one-time bundle-ID migration from older builds seamless: the
+  /// old shell may stop its server just after the replacement opens.
+  private func scheduleAttachedServerHealthCheck(port: Int, generation: Int) {
+    DispatchQueue.main.asyncAfter(deadline: .now() + 5) { [weak self] in
+      guard let self,
+        !self.stopping,
+        generation == self.attachmentMonitorGeneration,
+        self.spawnedProcess == nil else { return }
+      self.probe(port: port, logResult: false) { [weak self] result in
+        guard let self,
+          !self.stopping,
+          generation == self.attachmentMonitorGeneration,
+          self.spawnedProcess == nil else { return }
+        guard let replacementPort = Self.replacementPort(
+          afterAttachedProbe: result, attachedPort: port) else {
+          self.scheduleAttachedServerHealthCheck(port: port, generation: generation)
+          return
+        }
+        AppLog.shared.info(
+          "server: attached dsh on port \(port) disappeared; starting a managed replacement")
+        self.serverURL = nil
+        self.delegate?.serverController(
+          self, didUpdateStatus: "已连接的服务已退出，正在启动替代服务…")
+        self.spawn(port: replacementPort)
+      }
+    }
   }
 
   /// Locate a runnable `dsh` binary: explicit path, GUI/login-shell PATH,

@@ -144,7 +144,7 @@ enum ExecutableResolver {
       let pipe = Pipe()
       process.standardOutput = pipe
       process.standardError = FileHandle.nullDevice
-      let outputQueue = DispatchQueue(label: "com.deepseek-ai.harness.shell-lookup-output")
+      let outputQueue = DispatchQueue(label: "io.github.wheam.deepseek-harness.shell-lookup-output")
       var outputData = Data()
       pipe.fileHandleForReading.readabilityHandler = { handle in
         let data = handle.availableData

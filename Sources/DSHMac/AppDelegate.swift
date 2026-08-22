@@ -42,7 +42,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ServerControllerDelega
       exit(0)
     }
     distributedObserver = DistributedNotificationCenter.default().addObserver(
-      forName: NSNotification.Name("DSHHarnessShowWindow"), object: nil, queue: .main
+      forName: NSNotification.Name("io.github.wheam.deepseek-harness.show-window"),
+      object: nil,
+      queue: .main
     ) { [weak self] _ in
       AppLog.shared.info("app: received show-window request from another instance")
       self?.showMainWindow()
@@ -179,7 +181,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, ServerControllerDelega
     guard !others.isEmpty else { return false }
     AppLog.shared.info("app: another instance is running; asking it to show its window")
     DistributedNotificationCenter.default().postNotificationName(
-      NSNotification.Name("DSHHarnessShowWindow"), object: nil, userInfo: nil,
+      NSNotification.Name("io.github.wheam.deepseek-harness.show-window"),
+      object: nil,
+      userInfo: nil,
       deliverImmediately: true)
     return true
   }

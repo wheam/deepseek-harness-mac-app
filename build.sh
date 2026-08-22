@@ -39,10 +39,29 @@ rm -rf "$OUT"
 mkdir -p "$OUT/Contents/MacOS" "$OUT/Contents/Resources"
 cp "$BIN_PATH" "$OUT/Contents/MacOS/$BIN_NAME"
 cp Info.plist "$OUT/Contents/Info.plist"
+# CI stamps release metadata without requiring source edits for every build.
+# Version tags set APP_VERSION; rolling builds keep the marketing version but
+# receive a unique APP_BUILD and source commit.
+if [ -n "${APP_VERSION:-}" ]; then
+  [[ "$APP_VERSION" =~ ^[0-9]+(\.[0-9]+){1,2}$ ]] \
+    || { echo "error: APP_VERSION must contain 2-3 numeric components" >&2; exit 1; }
+  /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $APP_VERSION" "$OUT/Contents/Info.plist"
+fi
+if [ -n "${APP_BUILD:-}" ]; then
+  [[ "$APP_BUILD" =~ ^[0-9]+(\.[0-9]+)*$ ]] \
+    || { echo "error: APP_BUILD must be numeric" >&2; exit 1; }
+  /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $APP_BUILD" "$OUT/Contents/Info.plist"
+fi
 # Stamp the build time (ISO 8601 UTC): the self-updater compares it with
 # the rolling GitHub release's publish time.
 /usr/libexec/PlistBuddy -c "Delete :DSHBuildDate" "$OUT/Contents/Info.plist" 2>/dev/null || true
 /usr/libexec/PlistBuddy -c "Add :DSHBuildDate string $(date -u +%Y-%m-%dT%H:%M:%SZ)" "$OUT/Contents/Info.plist"
+BUILD_COMMIT="${BUILD_COMMIT:-$(git rev-parse --verify HEAD 2>/dev/null || true)}"
+if [[ "$BUILD_COMMIT" =~ ^[0-9a-fA-F]{7,40}$ ]]; then
+  /usr/libexec/PlistBuddy -c "Delete :DSHBuildCommit" "$OUT/Contents/Info.plist" 2>/dev/null || true
+  /usr/libexec/PlistBuddy -c "Add :DSHBuildCommit string $BUILD_COMMIT" "$OUT/Contents/Info.plist"
+fi
+echo "==> version: $(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$OUT/Contents/Info.plist") ($(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$OUT/Contents/Info.plist")) commit=${BUILD_COMMIT:-unknown}"
 
 if command -v swift >/dev/null 2>&1 && command -v iconutil >/dev/null 2>&1; then
   ICONSET=".build/AppIcon.iconset"

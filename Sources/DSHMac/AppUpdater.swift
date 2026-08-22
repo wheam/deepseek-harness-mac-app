@@ -221,8 +221,15 @@ final class AppUpdater {
         try fm.removeItem(atPath: tempRoot)
       }
       try fm.createDirectory(atPath: tempRoot, withIntermediateDirectories: true)
-      guard let data = try? Data(contentsOf: release.assetURL) else {
+      defer { try? fm.removeItem(atPath: tempRoot) }
+      guard let data = Self.downloadReleaseAsset(from: release.assetURL) else {
         AppLog.shared.error("updater: shell download failed")
+        return
+      }
+      let actualDigest = ReleaseTrust.sha256Hex(data)
+      guard actualDigest == release.assetSHA256 else {
+        AppLog.shared.error(
+          "updater: shell SHA256 mismatch (expected \(release.assetSHA256), got \(actualDigest))")
         return
       }
       try data.write(to: URL(fileURLWithPath: zipPath))
@@ -236,8 +243,10 @@ final class AppUpdater {
         return
       }
       let newBundle = unzipDir + "/DeepSeek Harness.app"
-      guard FileManager.default.fileExists(atPath: newBundle + "/Contents/MacOS/DeepSeekHarness") else {
-        AppLog.shared.error("updater: unzipped bundle is incomplete")
+      do {
+        try ReleaseTrust.verifyAppBundle(at: URL(fileURLWithPath: newBundle))
+      } catch {
+        AppLog.shared.error("updater: rejected shell update: \(error.localizedDescription)")
         return
       }
       // Downloaded bundles carry the quarantine attribute; strip it before
@@ -245,8 +254,12 @@ final class AppUpdater {
       let unquarantine = Process()
       unquarantine.executableURL = URL(fileURLWithPath: "/usr/bin/xattr")
       unquarantine.arguments = ["-dr", "com.apple.quarantine", newBundle]
-      try? unquarantine.run()
-      unquarantine.waitUntilExit()
+      do {
+        try unquarantine.run()
+        unquarantine.waitUntilExit()
+      } catch {
+        AppLog.shared.info("updater: xattr cleanup skipped: \(error.localizedDescription)")
+      }
       try swapBundles(newBundle: newBundle)
       UserDefaults.standard.set(release.publishedAt.timeIntervalSince1970, forKey: Self.appliedDateKey)
       AppLog.shared.info("updater: shell updated to build published \(release.publishedAt)")
@@ -301,12 +314,38 @@ final class AppUpdater {
 
   private static func relaunch() {
     let process = Process()
-    process.executableURL = URL(fileURLWithPath: "/usr/bin/open")
-    process.arguments = ["-n", Bundle.main.bundlePath]
-    try? process.run()
-    DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+    process.executableURL = URL(fileURLWithPath: "/bin/sh")
+    process.arguments = relaunchHelperArguments(
+      currentPID: ProcessInfo.processInfo.processIdentifier,
+      bundlePath: Bundle.main.bundlePath)
+    process.standardInput = FileHandle.nullDevice
+    process.standardOutput = FileHandle.nullDevice
+    process.standardError = FileHandle.nullDevice
+    do {
+      try process.run()
       NSApp.terminate(nil)
+    } catch {
+      AppLog.shared.error("updater: failed to launch relaunch helper: \(error.localizedDescription)")
+      let alert = NSAlert()
+      alert.alertStyle = .warning
+      alert.messageText = "无法自动重新启动"
+      alert.informativeText = "新版本已经安装，但重新启动助手未能运行。请手动退出并重新打开 DeepSeek Harness。"
+      alert.addButton(withTitle: "知道了")
+      alert.runModal()
     }
+  }
+
+  /// The helper must wait until the old process has completed its delegate
+  /// shutdown; launching first would trigger the single-instance guard and
+  /// leave no process running after the old copy exits.
+  static func relaunchHelperArguments(currentPID: Int32, bundlePath: String) -> [String] {
+    [
+      "-c",
+      "while /bin/kill -0 \"$1\" 2>/dev/null; do /bin/sleep 0.2; done; exec /usr/bin/open -n \"$2\"",
+      "dsh-relaunch",
+      String(currentPID),
+      bundlePath,
+    ]
   }
 
   private static func buildDate() -> Date? {
@@ -324,10 +363,12 @@ final class AppUpdater {
       ?? formatter.date(from: string + "Z") // plain UTC stamps without a zone
   }
 
-  /// The rolling "latest" release: publish time and the zip asset URL.
+  /// The rolling "latest" release: effective asset time, URL, and GitHub's
+  /// server-computed SHA256 digest.
   private struct ShellRelease {
     let publishedAt: Date
     let assetURL: URL
+    let assetSHA256: String
   }
 
   private static func fetchLatestRelease() -> ShellRelease? {
@@ -337,9 +378,10 @@ final class AppUpdater {
     request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
     let semaphore = DispatchSemaphore(value: 0)
     var result: ShellRelease?
-    URLSession.shared.dataTask(with: request) { data, _, _ in
+    URLSession.shared.dataTask(with: request) { data, response, _ in
       defer { semaphore.signal() }
-      guard let data,
+      guard let http = response as? HTTPURLResponse, http.statusCode == 200,
+        let data,
         let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
         let published = json["published_at"] as? String,
         let publishedAt = parseIso8601(published),
@@ -347,12 +389,42 @@ final class AppUpdater {
       for asset in assets {
         guard asset["name"] as? String == "DeepSeek-Harness.zip",
           let rawURL = asset["browser_download_url"] as? String,
-          let assetURL = URL(string: rawURL) else { continue }
-        result = ShellRelease(publishedAt: publishedAt, assetURL: assetURL)
+          let assetURL = URL(string: rawURL),
+          assetURL.host == "github.com",
+          assetURL.path.hasPrefix("/\(repo)/releases/download/"),
+          let digest = ReleaseTrust.normalizedSHA256Digest(asset["digest"] as? String) else {
+          continue
+        }
+        let assetUpdatedAt = (asset["updated_at"] as? String).flatMap(parseIso8601)
+          ?? publishedAt
+        result = ShellRelease(
+          publishedAt: max(publishedAt, assetUpdatedAt),
+          assetURL: assetURL,
+          assetSHA256: digest)
         break
       }
     }.resume()
     _ = semaphore.wait(timeout: .now() + 25)
+    return result
+  }
+
+  private static func downloadReleaseAsset(from url: URL) -> Data? {
+    let configuration = URLSessionConfiguration.ephemeral
+    configuration.timeoutIntervalForRequest = 30
+    configuration.timeoutIntervalForResource = 120
+    let session = URLSession(configuration: configuration)
+    let semaphore = DispatchSemaphore(value: 0)
+    var result: Data?
+    session.dataTask(with: url) { data, response, _ in
+      defer { semaphore.signal() }
+      guard let http = response as? HTTPURLResponse,
+        http.statusCode == 200,
+        let data,
+        data.count <= 100 * 1024 * 1024 else { return }
+      result = data
+    }.resume()
+    _ = semaphore.wait(timeout: .now() + 125)
+    session.invalidateAndCancel()
     return result
   }
 
@@ -372,7 +444,7 @@ final class AppUpdater {
     process.standardOutput = pipe
     process.standardError = pipe
     var output = Data()
-    let outputQueue = DispatchQueue(label: "com.deepseek-ai.harness.npm-output")
+    let outputQueue = DispatchQueue(label: "io.github.wheam.deepseek-harness.npm-output")
     pipe.fileHandleForReading.readabilityHandler = { handle in
       let data = handle.availableData
       guard !data.isEmpty else { return }

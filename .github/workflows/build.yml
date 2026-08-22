@@ -1,19 +1,25 @@
 name: Build and Release
 
 on:
+  pull_request:
+    branches: [main]
   push:
     branches: [main]
     tags: ["v*"]
   workflow_dispatch:
 
+# A queued main build must finish publishing before the next one starts. Do not
+# cancel an in-progress publisher: interruption during the final release swap
+# could otherwise strand legacy clients that still request the `latest` tag.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
 permissions:
-  contents: write
+  contents: read
 
 env:
-  # Shown on every release. The app carries a self-signed signature (no paid
-  # Apple Developer ID), so a *browser* download triggers Gatekeeper on first
-  # launch; the one-line installer avoids the quarantine attribute entirely.
-  # Keep these notes in sync with the README's download guide.
+  TRUSTED_CERT_SHA256: b27ec2f2110df554e415d0142ea13ab504f359db1698398b61ef702a4f6f481b
   RELEASE_NOTES: |
     **One-line install (no Gatekeeper warning):**
 
@@ -21,102 +27,191 @@ env:
     curl -fsSL https://github.com/wheam/deepseek-harness-mac-app/releases/download/latest/install.sh | sh
     ```
 
-    The installer reuses an existing global `dsh`, or bootstraps Node.js/npm and installs one shared global CLI when needed. It then downloads `DeepSeek-Harness.zip`, verifies the code signature, installs into `/Applications` (or `~/Applications` if that isn't writable) and opens the app. Because it is not a browser download, the app carries no quarantine attribute — no warning, no extra steps.
+    The installer reuses an existing global `dsh`, or bootstraps Node.js/npm and installs one shared global CLI when needed. It verifies the archive SHA256, the complete app code signature, the bundle identifier, and the pinned release-certificate fingerprint before installing into `/Applications` (or `~/Applications` if that isn't writable). Because it is not a browser download, the app carries no quarantine attribute.
 
-    **Manual download:** this build is signed with a self-signed identity (no Apple Developer ID), so a browser download triggers Gatekeeper on first launch. To allow it:
+    **Manual download:** this build is signed with a pinned self-signed identity (no paid Apple Developer ID), so a browser download triggers Gatekeeper on first launch. To allow it:
 
-    - macOS 15+ (Sequoia/Tahoe): after the blocked first attempt, open **System Settings → Privacy & Security → Security** and click **"Open Anyway"** (the right-click → Open override was removed in macOS 15), **or**
+    - macOS 15+: after the blocked first attempt, open **System Settings → Privacy & Security → Security** and click **"Open Anyway"**, **or**
     - macOS 13/14: right-click (Ctrl-click) the app in Finder → **Open**, then confirm, **or**
     - run: `xattr -cr "/Applications/DeepSeek Harness.app"`
 
-    Removing the warning for browser downloads entirely requires an Apple Developer ID certificate + notarization (paid Apple Developer Program). See the README for details.
+    Removing the warning for browser downloads entirely requires an Apple Developer ID certificate + notarization. See the README for details.
 
 jobs:
-  build:
-    runs-on: macos-14
+  verify:
+    name: Verify (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            arch: arm64
+          - runner: macos-15-intel
+            arch: x86_64
+    runs-on: ${{ matrix.runner }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Verify runner architecture
+        env:
+          EXPECTED_ARCH: ${{ matrix.arch }}
+        run: |
+          test "$(uname -m)" = "$EXPECTED_ARCH"
+          swift --version
+
+      - name: Validate scripts and property list
+        run: |
+          bash -n build.sh
+          bash -n install.sh
+          bash -n scripts/setup-signing.sh
+          /usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' Info.plist \
+            | grep -Fx 'io.github.wheam.deepseek-harness'
+          plutil -lint Info.plist
 
       - name: Run tests
         run: swift test
 
-      - name: Set up signing identity
+  build_and_release:
+    name: Build and publish
+    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
+    needs: verify
+    runs-on: macos-15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+
+      - name: Set release metadata
+        run: |
+          version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' Info.plist)"
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            version="${GITHUB_REF_NAME#v}"
+            [[ "$version" =~ ^[0-9]+(\.[0-9]+){1,2}$ ]] || {
+              echo "::error::version tags must look like v1.2 or v1.2.3"
+              exit 1
+            }
+          fi
+          echo "APP_VERSION=$version" >> "$GITHUB_ENV"
+          echo "APP_BUILD=$GITHUB_RUN_NUMBER" >> "$GITHUB_ENV"
+          echo "BUILD_COMMIT=$GITHUB_SHA" >> "$GITHUB_ENV"
+
+      - name: Set up required signing identity
         env:
           P12_BASE64: ${{ secrets.GH_CODESIGN_P12_BASE64 }}
           P12_PASSWORD: ${{ secrets.GH_CODESIGN_P12_PASSWORD }}
         run: |
-          if [ -n "$P12_BASE64" ] && [ -n "$P12_PASSWORD" ]; then
-            echo "$P12_BASE64" | base64 -d > /tmp/dsh-dev.p12
-            security create-keychain -p "$P12_PASSWORD" /tmp/dsh-signing.keychain-db
-            security set-keychain-settings -lut 21600 /tmp/dsh-signing.keychain-db
-            security unlock-keychain -p "$P12_PASSWORD" /tmp/dsh-signing.keychain-db
-            security import /tmp/dsh-dev.p12 -P "$P12_PASSWORD" -k /tmp/dsh-signing.keychain-db -T /usr/bin/codesign
-            security set-key-partition-list -S apple-tool:,apple: -s -k "$P12_PASSWORD" /tmp/dsh-signing.keychain-db
-            security list-keychains -d user -s /tmp/dsh-signing.keychain-db
-            rm -f /tmp/dsh-dev.p12
-            # The certificate must carry the Code Signing EKU
-            # (1.3.6.1.5.5.7.3.3); it is enforced on the shipped bundle in
-            # the "Verify code signature" step (build.sh also falls back to
-            # ad-hoc when it is missing).
-            echo "CODESIGN_IDENTITY=DeepSeek Harness Dev" >> "$GITHUB_ENV"
-            echo "CODESIGN_KEYCHAIN=/tmp/dsh-signing.keychain-db" >> "$GITHUB_ENV"
-            echo "CODESIGN_KEYCHAIN_PASSWORD=$P12_PASSWORD" >> "$GITHUB_ENV"
-            echo "signing identity ready"
-          else
-            echo "no signing secrets; build.sh falls back to ad-hoc"
+          if [ -z "$P12_BASE64" ] || [ -z "$P12_PASSWORD" ]; then
+            echo "::error::release signing secrets are required; refusing to publish an ad-hoc build"
+            exit 1
           fi
+          echo "$P12_BASE64" | base64 -d > /tmp/dsh-dev.p12
+          security create-keychain -p "$P12_PASSWORD" /tmp/dsh-signing.keychain-db
+          security set-keychain-settings -lut 21600 /tmp/dsh-signing.keychain-db
+          security unlock-keychain -p "$P12_PASSWORD" /tmp/dsh-signing.keychain-db
+          security import /tmp/dsh-dev.p12 -P "$P12_PASSWORD" -k /tmp/dsh-signing.keychain-db -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$P12_PASSWORD" /tmp/dsh-signing.keychain-db
+          security list-keychains -d user -s /tmp/dsh-signing.keychain-db
+          rm -f /tmp/dsh-dev.p12
+          echo "CODESIGN_IDENTITY=DeepSeek Harness Dev" >> "$GITHUB_ENV"
+          echo "CODESIGN_KEYCHAIN=/tmp/dsh-signing.keychain-db" >> "$GITHUB_ENV"
+          echo "CODESIGN_KEYCHAIN_PASSWORD=$P12_PASSWORD" >> "$GITHUB_ENV"
 
       - name: Build universal app bundle
         run: UNIVERSAL=1 ./build.sh
 
-      - name: Verify code signature
+      - name: Verify release identity and metadata
         run: |
-          bash -n install.sh
-          codesign --verify --deep --strict --verbose=2 "dist/DeepSeek Harness.app"
-          codesign -dv --verbose=2 "dist/DeepSeek Harness.app"
-          # Gatekeeper rejects both self-signed and ad-hoc signatures; log
-          # the assessment for transparency (the warning is expected, see
-          # the README's download guide for the first-launch steps).
-          spctl -a -vv --type execute "dist/DeepSeek Harness.app" || true
-          if [ -n "${CODESIGN_IDENTITY:-}" ]; then
-            # The fixed identity was requested, so the shipped bundle must
-            # embed a certificate with the Code Signing EKU
-            # (1.3.6.1.5.5.7.3.3); without it a downloaded copy can be
-            # reported as "damaged" instead of "unidentified developer".
-            # Fail the build rather than ship a bad certificate.
-            mkdir -p /tmp/dsh-certs && cd /tmp/dsh-certs
-            codesign -d --extract-certificates "$GITHUB_WORKSPACE/dist/DeepSeek Harness.app"
-            openssl x509 -inform DER -in codesign0 -noout -text | grep -Eqi "code signing" \
-              || { echo "::error::shipped bundle lacks a certificate with the Code Signing EKU; regenerate the p12 with scripts/signing.cnf (see scripts/setup-signing.sh)"; exit 1; }
-          fi
+          app='dist/DeepSeek Harness.app'
+          codesign --verify --deep --strict --verbose=2 "$app"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$app/Contents/Info.plist")" \
+            = 'io.github.wheam.deepseek-harness'
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$app/Contents/Info.plist")" \
+            = "$APP_VERSION"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$app/Contents/Info.plist")" \
+            = "$APP_BUILD"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :DSHBuildCommit' "$app/Contents/Info.plist")" \
+            = "$GITHUB_SHA"
+          archs="$(lipo -archs "$app/Contents/MacOS/DeepSeekHarness")"
+          { test "$archs" = 'x86_64 arm64' || test "$archs" = 'arm64 x86_64'; }
+          cert_dir="$(mktemp -d /tmp/dsh-certs.XXXXXX)"
+          (cd "$cert_dir" && codesign -d --extract-certificates "$GITHUB_WORKSPACE/$app")
+          openssl x509 -inform DER -in "$cert_dir/codesign0" -noout -text | grep -Eqi 'code signing'
+          actual_cert_sha="$(shasum -a 256 "$cert_dir/codesign0" | awk '{print $1}')"
+          test "$actual_cert_sha" = "$TRUSTED_CERT_SHA256" || {
+            echo "::error::release certificate fingerprint changed; update clients before rotating the signing key"
+            exit 1
+          }
+          spctl -a -vv --type execute "$app" || true
 
-      - name: Package zip
+      - name: Exercise built-in release verifier against shipped bundle
+        env:
+          DSH_SIGNED_APP_UNDER_TEST: ${{ github.workspace }}/dist/DeepSeek Harness.app
+        run: swift test --filter AppUpdaterTests/testReleaseTrustAcceptsSignedBuildWhenProvided
+
+      - name: Package immutable release inputs
         run: |
           cd dist
-          ditto -c -k --sequesterRsrc --keepParent "DeepSeek Harness.app" DeepSeek-Harness.zip
+          ditto -c -k --sequesterRsrc --keepParent 'DeepSeek Harness.app' DeepSeek-Harness.zip
           cd ..
-          mv "dist/DeepSeek-Harness.zip" .
+          mv dist/DeepSeek-Harness.zip .
+          shasum -a 256 DeepSeek-Harness.zip > DeepSeek-Harness.zip.sha256
 
       - name: Upload build artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: DeepSeek-Harness
-          path: DeepSeek-Harness.zip
+          path: |
+            DeepSeek-Harness.zip
+            DeepSeek-Harness.zip.sha256
           if-no-files-found: error
 
-      - name: Publish tag release
-        if: startsWith(github.ref, 'refs/tags/')
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release create "$GITHUB_REF_NAME" DeepSeek-Harness.zip install.sh --notes "$RELEASE_NOTES"
-
-      - name: Publish rolling "latest" release
-        if: github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch'
+      - name: Publish version-tag release
+        if: startsWith(github.ref, 'refs/tags/v')
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release delete latest --yes --cleanup-tag || true
-          gh release create latest DeepSeek-Harness.zip install.sh \
-            --title "Latest build" \
-            --notes "$RELEASE_NOTES" \
-            --prerelease
+          gh release create "$GITHUB_REF_NAME" \
+            DeepSeek-Harness.zip DeepSeek-Harness.zip.sha256 install.sh \
+            --verify-tag \
+            --latest=false \
+            --notes "$RELEASE_NOTES"
+
+      - name: Stage and atomically swap rolling latest release
+        if: github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          staging_tag="latest-staging-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          gh release create "$staging_tag" \
+            DeepSeek-Harness.zip DeepSeek-Harness.zip.sha256 install.sh \
+            --draft \
+            --target "$GITHUB_SHA" \
+            --title 'Latest build' \
+            --notes "$RELEASE_NOTES"
+
+          # All new assets are safely uploaded in the draft before the public
+          # pointer changes. The short swap preserves the legacy `latest` tag
+          # used by already-installed clients without risking an empty release.
+          gh release delete latest --yes || true
+          git tag -f latest "$GITHUB_SHA"
+          git push origin refs/tags/latest --force
+          for attempt in 1 2 3 4 5; do
+            if gh release edit "$staging_tag" \
+              --tag latest \
+              --target "$GITHUB_SHA" \
+              --title 'Latest build' \
+              --notes "$RELEASE_NOTES" \
+              --draft=false \
+              --prerelease; then
+              break
+            fi
+            if [ "$attempt" = 5 ]; then
+              echo "::error::staged latest release could not be published"
+              exit 1
+            fi
+            sleep 2
+          done
+          git push origin ":refs/tags/$staging_tag" || true
+          gh release view latest --json tagName,targetCommitish,assets,url
