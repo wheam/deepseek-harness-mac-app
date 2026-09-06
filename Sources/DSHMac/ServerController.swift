@@ -3,8 +3,10 @@ import Foundation
 
 /// What a loopback probe found on the target port.
 enum ProbeResult: Equatable {
-  /// A live dsh web instance (identified by its served page marker).
+  /// A live dsh web instance with a compatible client boot manifest.
   case dshReady(port: Int)
+  /// A dsh process whose served boot graph and client are incompatible.
+  case incompatibleDsh
   /// Something else is listening.
   case otherService
   /// Nothing is listening.
@@ -32,9 +34,21 @@ protocol ServerControllerDelegate: AnyObject {
 /// startup, readiness detection, crash restart, and graceful teardown.
 final class ServerController {
   /// Ready line dsh prints after the Loader settles and the server binds:
-  /// `dsh web: http://127.0.0.1:<port>`.
+  /// `dsh web: http://127.0.0.1:<port>/?token=...` (older releases omit the token).
   static let readyPattern = try! NSRegularExpression(
-    pattern: #"dsh web: http://127\.0\.0\.1:(\d+)"#)
+    pattern: #"dsh web:\s+(http://[^\s]+)"#)
+
+  static func readyURL(from line: String) -> URL? {
+    let range = NSRange(line.startIndex..., in: line)
+    guard let match = readyPattern.firstMatch(in: line, range: range),
+      let urlRange = Range(match.range(at: 1), in: line),
+      let url = URL(string: String(line[urlRange])),
+      url.scheme == "http", url.host == "127.0.0.1",
+      let port = url.port, (1...65535).contains(port),
+      url.user == nil, url.password == nil,
+      url.path.isEmpty || url.path == "/" else { return nil }
+    return url
+  }
 
   let options: LaunchOptions
   weak var delegate: ServerControllerDelegate?
@@ -74,7 +88,7 @@ final class ServerController {
       return forceSpawn ? .spawn(port: 0) : .attach(port: port)
     case .free:
       return .spawn(port: hasExplicitPort ? targetPort : nil)
-    case .otherService:
+    case .otherService, .incompatibleDsh:
       // Never fail merely because the conventional port belongs to another
       // app. Asking dsh for an OS-assigned port preserves both services.
       return .spawn(port: 0)
@@ -87,7 +101,7 @@ final class ServerController {
       return nil
     case .free:
       return attachedPort
-    case .otherService:
+    case .otherService, .incompatibleDsh:
       return 0
     }
   }
@@ -103,6 +117,7 @@ final class ServerController {
   func start() {
     stopping = false
     attachmentMonitorGeneration += 1
+    let generation = attachmentMonitorGeneration
     let targetPort = options.port ?? 3080
     let forced = options.port != nil
     AppLog.shared.info("server: start; target port \(targetPort), forceSpawn=\(options.forceSpawn)")
@@ -110,7 +125,8 @@ final class ServerController {
       ? "正在启动本地服务…"
       : "正在检查本地服务…")
     probe(port: targetPort) { [weak self] result in
-      guard let self else { return }
+      guard let self, !self.stopping,
+        generation == self.attachmentMonitorGeneration else { return }
       let decision = Self.startupDecision(
         for: result,
         targetPort: targetPort,
@@ -120,6 +136,10 @@ final class ServerController {
       case .attach(let port):
         self.attach(port: port)
       case .spawn(let port):
+        if result == .incompatibleDsh {
+          AppLog.shared.info(
+            "server: incompatible dsh on port \(targetPort); leaving it running and starting a managed replacement")
+        }
         if result == .otherService || (self.options.forceSpawn && port == 0) {
           AppLog.shared.info(
             "server: port \(targetPort) is already in use; spawning on an OS-assigned port")
@@ -230,19 +250,15 @@ final class ServerController {
     let line = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
     guard !line.isEmpty else { return }
     AppLog.shared.info("dsh: \(line)")
-    logTail.append(line)
+    logTail.append(AppLog.redactingTokens(line))
     if logTail.count > 200 { logTail.removeFirst(logTail.count - 200) }
     guard serverURL == nil else { return }
-    let range = NSRange(line.startIndex..., in: line)
-    guard let match = Self.readyPattern.firstMatch(in: line, range: range),
-      let portRange = Range(match.range(at: 1), in: line),
-      let port = Int(line[portRange]) else { return }
-    DispatchQueue.main.async { [weak self] in self?.becomeReady(port: port) }
+    guard let url = Self.readyURL(from: line) else { return }
+    DispatchQueue.main.async { [weak self] in self?.becomeReady(url: url) }
   }
 
-  private func becomeReady(port: Int) {
-    guard serverURL == nil else { return }
-    let url = URL(string: "http://127.0.0.1:\(port)/")!
+  private func becomeReady(url: URL) {
+    guard serverURL == nil, !stopping else { return }
     AppLog.shared.info("server: ready at \(url)")
     serverURL = url
     readyTimeoutWork?.cancel()
@@ -339,33 +355,12 @@ final class ServerController {
     logResult: Bool = true,
     completion: @escaping (ProbeResult) -> Void
   ) {
-    guard let url = URL(string: "http://127.0.0.1:\(port)/") else {
-      completion(.free)
-      return
-    }
-    var request = URLRequest(url: url)
-    request.timeoutInterval = 2
-    let session = URLSession(configuration: .ephemeral)
-    session.dataTask(with: request) { data, response, error in
-      let result: ProbeResult
-      if error != nil {
-        if logResult {
-          AppLog.shared.info("server: probe \(port): free (\(error?.localizedDescription ?? ""))")
-        }
-        result = .free
-      } else if let http = response as? HTTPURLResponse, let data,
-        http.statusCode < 500,
-        (String(data: data, encoding: .utf8) ?? "").contains("DeepSeek Harness") {
-        if logResult { AppLog.shared.info("server: probe \(port): dsh web present") }
-        result = .dshReady(port: port)
-      } else {
-        if logResult { AppLog.shared.info("server: probe \(port): other service") }
-        result = .otherService
-      }
+    DshWebProbe.probe(port: port) { result in
+      if logResult { AppLog.shared.info("server: probe \(port): \(result)") }
       // URLSession completion handlers run on a background queue; delegate
       // calls touch WKWebView/AppKit, which requires the main thread.
       DispatchQueue.main.async { completion(result) }
-    }.resume()
+    }
   }
 
   /// An attached process is intentionally not owned or terminated by this app,
@@ -389,10 +384,10 @@ final class ServerController {
           return
         }
         AppLog.shared.info(
-          "server: attached dsh on port \(port) disappeared; starting a managed replacement")
+          "server: attached dsh on port \(port) unavailable (\(result)); starting a managed replacement")
         self.serverURL = nil
         self.delegate?.serverController(
-          self, didUpdateStatus: "已连接的服务已退出，正在启动替代服务…")
+          self, didUpdateStatus: "已连接的服务不可用，正在启动替代服务…")
         self.spawn(port: replacementPort)
       }
     }

@@ -40,10 +40,17 @@ final class AppLog {
   /// Write an error line.
   func error(_ message: String) { write(level: "ERROR", message) }
 
+  /// New dsh readiness URLs include a browser sign-in token. Keep it for
+  /// navigation, but never persist it in logs or show it in failure dialogs.
+  static func redactingTokens(_ message: String) -> String {
+    message.replacingOccurrences(
+      of: #"([?&]token=)[^&\s#]+"#, with: "$1<redacted>", options: .regularExpression)
+  }
+
   private func write(level: String, _ message: String) {
     queue.async { [weak self] in
       guard let self, let handle = self.handle else { return }
-      let line = "\(self.formatter.string(from: Date())) [\(level)] \(message)\n"
+      let line = "\(self.formatter.string(from: Date())) [\(level)] \(Self.redactingTokens(message))\n"
       handle.write(line.data(using: .utf8) ?? Data())
     }
   }

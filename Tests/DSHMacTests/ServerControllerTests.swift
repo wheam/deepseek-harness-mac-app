@@ -2,6 +2,26 @@ import XCTest
 @testable import DSHMac
 
 final class ServerControllerTests: XCTestCase {
+  func testReadinessPreservesTheBrowserAuthenticationToken() {
+    let address = "http://127.0.0.1:4123/?token=test-token_123&mode=web"
+    XCTAssertEqual(ServerController.readyURL(from: "dsh web: \(address)")?.absoluteString, address)
+    XCTAssertEqual(ServerController.readyURL(from: "dsh web: http://127.0.0.1:3080")?.port, 3080)
+    XCTAssertEqual(ServerController.readyURL(from: "dsh web: http://127.0.0.1:3080/")?.path, "/")
+    XCTAssertNil(ServerController.readyURL(from: "dsh web: http://127.0.0.1.evil.test:3080/"))
+    XCTAssertNil(ServerController.readyURL(from: "dsh web: http://127.0.0.1:0/"))
+    XCTAssertNil(ServerController.readyURL(from: "dsh web: http://user@127.0.0.1:3080/"))
+    XCTAssertNil(ServerController.readyURL(from: "dsh web: http://127.0.0.1:3080/unrelated"))
+  }
+
+  func testBrowserTokensAreRedactedFromLogsAndFailureTails() {
+    XCTAssertEqual(AppLog.redactingTokens("dsh web: http://127.0.0.1:4123/?token=test-token&x=1"),
+      "dsh web: http://127.0.0.1:4123/?token=<redacted>&x=1")
+    XCTAssertEqual(AppLog.redactingTokens("loading /?x=1&token=secret\nnext line"),
+      "loading /?x=1&token=<redacted>\nnext line")
+    XCTAssertEqual(AppLog.redactingTokens("dsh web: http://127.0.0.1:3080/"),
+      "dsh web: http://127.0.0.1:3080/")
+  }
+
   func testSpawnArgumentsDisableExternalBrowser() {
     XCTAssertEqual(ServerController.webArguments(port: nil), ["web", "--no-open"])
     XCTAssertEqual(
@@ -44,6 +64,16 @@ final class ServerControllerTests: XCTestCase {
         hasExplicitPort: true,
         forceSpawn: false),
       .spawn(port: 4123))
+  }
+
+  func testIncompatibleDshIsBypassedEvenOnAnExplicitPort() {
+    for explicit in [false, true] {
+      XCTAssertEqual(ServerController.startupDecision(
+        for: .incompatibleDsh, targetPort: 3080, hasExplicitPort: explicit, forceSpawn: false),
+        .spawn(port: 0))
+    }
+    XCTAssertEqual(ServerController.replacementPort(
+      afterAttachedProbe: .incompatibleDsh, attachedPort: 3080), 0)
   }
 
   func testAttachedServerRecoveryReusesThePortOnlyWhenItIsFree() {

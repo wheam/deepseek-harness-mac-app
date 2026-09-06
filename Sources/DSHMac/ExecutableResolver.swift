@@ -145,11 +145,17 @@ enum ExecutableResolver {
       process.standardOutput = pipe
       process.standardError = FileHandle.nullDevice
       let outputQueue = DispatchQueue(label: "io.github.wheam.deepseek-harness.shell-lookup-output")
+      let outputFinished = DispatchSemaphore(value: 0)
       var outputData = Data()
       pipe.fileHandleForReading.readabilityHandler = { handle in
-        let data = handle.availableData
-        guard !data.isEmpty else { return }
-        outputQueue.sync { outputData.append(data) }
+        outputQueue.sync {
+          let data = handle.availableData
+          if data.isEmpty {
+            outputFinished.signal()
+          } else {
+            outputData.append(data)
+          }
+        }
       }
 
       let exited = DispatchSemaphore(value: 0)
@@ -166,6 +172,11 @@ enum ExecutableResolver {
           continue
         }
       }
+      // Process exit can arrive before the final pipe-read callback. Wait for
+      // EOF before detaching it so fast login shells do not lose their result.
+      // Bound the wait in case a shell startup script leaves a child holding
+      // stdout open after the shell itself exits.
+      _ = outputFinished.wait(timeout: .now() + 1)
       pipe.fileHandleForReading.readabilityHandler = nil
       let captured = outputQueue.sync { outputData }
       let output = String(data: captured, encoding: .utf8) ?? ""
