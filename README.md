@@ -23,9 +23,10 @@
 ### 它能做什么
 
 - **双击打开即用**：自动探测 `127.0.0.1:3080`
-  - 已有 `dsh web` 在跑 → 直接复用（窗口里就是那个页面），退出时绝不碰它；
+  - 已有兼容的 `dsh web` 在跑 → 直接复用（窗口里就是那个页面），退出时绝不碰它；
+  - 升级后旧进程的启动清单与新插件不兼容 → 保留旧进程，另起新服务；
   - 没有 → 作为子进程拉起 `dsh web --no-open`（经登录 shell，继承 `~/.zshrc` 等环境），
-    解析 `dsh web: http://127.0.0.1:<port>` 就绪行后加载页面；
+    解析 `dsh web: http://127.0.0.1:<port>` 就绪行后加载页面（保留新版的登录 token，日志中自动隐去）；
   - 端口被其他程序占用 → 换一个系统分配的空闲端口。
 - **符合 macOS 惯例的窗口行为**
   - Cmd+W / 红灯关窗：只关窗口，App 留在 Dock、服务继续运行；点 Dock 图标窗口回来（页面状态保留）；
@@ -51,6 +52,11 @@
   App 外壳会自动检查 GitHub 的最新构建，严格核对 GitHub SHA256、完整代码签名、Bundle ID 和固定发布证书指纹后才替换并提示重启（`--no-auto-update` 可关闭）。重启助手会等待旧进程及其服务完全退出后再打开新版本。
 
 日志：`~/Library/Logs/DeepSeekHarness/deepseek-harness.log`。
+
+升级后若出现 `boot manifest batches must be an array`，通常是旧服务仍在运行，却读取了更新后的插件文件。
+App 会对旧格式启动清单进一步检查实际提供的模块加载器，发现不兼容后在空闲端口启动自己的服务；
+健康的旧版服务仍可复用。若新服务随后报告某个第三方插件缺少导出或等待已移除的服务，需要更新该插件：
+服务进程重启不能修复插件本身与新版 dsh 的接口差异。
 
 ### 环境要求
 
@@ -134,6 +140,7 @@ Sources/DSHMac/
   ReleaseTrust.swift              更新包 SHA256、Bundle ID 与发布证书固定校验
   ExecutableResolver.swift        GUI/终端 PATH、Node 版本管理器与用户 npm prefix 解析
   ServerController.swift          dsh 探测/拉起/就绪/保活/停止
+  DshWebProbe.swift               旧服务启动清单与实际插件兼容性探测
   WebViewController.swift         WKWebView + 双色标题栏 + 主题同步
   AppDelegate.swift               窗口、菜单、单实例、安装流程
 Info.plist
@@ -195,8 +202,9 @@ A native macOS app for the [DeepSeek Harness](https://github.com/deepseek-ai/dee
 ### What it does
 
 - **Double-click and go**: probes `127.0.0.1:3080`
-  - a running `dsh web` is reused as-is and never touched on quit;
-  - otherwise the app spawns `dsh web --no-open` as a child process (through the login shell, inheriting `~/.zshrc` etc.) and loads the page once the `dsh web: http://127.0.0.1:<port>` readiness line appears;
+  - a compatible running `dsh web` is reused as-is and never touched on quit;
+  - an old process serving a boot manifest incompatible with its updated plugins is left running while the app starts a fresh server;
+  - otherwise the app spawns `dsh web --no-open` as a child process (through the login shell, inheriting `~/.zshrc` etc.) and loads the page once the `dsh web: http://127.0.0.1:<port>` readiness line appears, preserving newer login tokens for navigation and redacting them from logs;
   - a port occupied by something else falls back to an OS-assigned port.
 - **macOS-native window behavior**
   - Cmd+W / the red traffic light closes only the window; the app and the server stay alive in the Dock, and clicking the Dock icon restores the window with page state intact;
@@ -218,6 +226,12 @@ A native macOS app for the [DeepSeek Harness](https://github.com/deepseek-ai/dee
 - **Auto-update on launch**: the global dsh CLI upgrades to the registry's latest (before the server starts); the shell accepts a newer GitHub bundle only after verifying its GitHub SHA256, full code signature, bundle identifier, and pinned release-certificate fingerprint. Its relaunch helper waits for the old process and managed server to exit before opening the replacement (`--no-auto-update` disables updates, but a missing CLI is still installed).
 
 Logs: `~/Library/Logs/DeepSeekHarness/deepseek-harness.log`.
+
+After an upgrade, `boot manifest batches must be an array` usually means an old server is still running while
+reading updated plugin files. For legacy boot manifests, the app also checks the module loader actually served
+by that process and starts its own server on a free port if they are incompatible. Healthy legacy servers remain
+reusable. If the new server then reports a third-party plugin with a missing export or a removed service dependency,
+update that plugin: restarting the server cannot repair incompatible plugin APIs.
 
 ### Requirements
 
@@ -306,6 +320,7 @@ Sources/DSHMac/
   ReleaseTrust.swift              update SHA256, bundle-ID, and release-certificate pinning
   ExecutableResolver.swift        GUI/shell PATH, Node version-manager, and user npm-prefix discovery
   ServerController.swift          dsh probe/spawn/readiness/keep-alive/stop
+  DshWebProbe.swift               compatibility probe for legacy boot manifests and served plugins
   WebViewController.swift         WKWebView + two-tone titlebar + theme sync
   AppDelegate.swift               window, menus, single instance, install flow
 Info.plist
