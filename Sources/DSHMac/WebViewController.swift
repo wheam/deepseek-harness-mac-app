@@ -755,6 +755,15 @@ final class WebViewController: NSViewController, WKNavigationDelegate, WKUIDeleg
   func focusSessionSearch() {
     runPageCommand("focus-session-search", script: """
       (() => {
+        // DSH 0.1.5 keeps a text input collapsed behind this action. Let
+        // the page expand its sidebar/search UI and focus the field.
+        const button = Array.from(document.querySelectorAll('button[aria-label]'))
+          .find((candidate) => /^(搜索会话|search sessions)$/i.test(
+            (candidate.getAttribute('aria-label') || '').trim()));
+        if (button) {
+          button.click();
+          return true;
+        }
         const field = document.querySelector(
           'input[type="search"],input[role="searchbox"],[role="searchbox"]');
         if (!field || typeof field.focus !== 'function') return false;
